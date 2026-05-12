@@ -1,0 +1,17 @@
+services:
+  sharetext:
+    build: .
+    image: sharetext:local
+    container_name: sharetext
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DB_PATH: /data/sharetext.db
+      SLUG_LEN: "16"
+    volumes:
+      - sharetext-data:/data
+    restart: unless-stopped
+
+volumes:
+  sharetext-data:

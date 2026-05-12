@@ -1,0 +1,8 @@
+/sharetext-server
+/server
+*.db
+*.db-wal
+*.db-shm
+.idea/
+.vscode/
+Specifications.txt

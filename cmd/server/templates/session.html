@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sharetext · {{.Slug}}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="bar">
+    <a href="/" class="brand">sharetext</a>
+    <div class="meta">
+      <span id="countdown" class="countdown" hidden></span>
+      <span class="status" id="status">offline</span>
+      <button id="copy-link">Copia link</button>
+      <button id="copy-all" class="primary">Copia tutto</button>
+    </div>
+  </header>
+  <main class="session">
+    <div class="pane edit">
+      <label for="content" class="label">Editor</label>
+      <textarea id="content" spellcheck="false" placeholder="Incolla qui il testo da condividere..."></textarea>
+    </div>
+    <div class="pane view">
+      <label class="label">Righe</label>
+      <ol id="lines" class="lines"></ol>
+    </div>
+  </main>
+  <div id="expired-overlay" class="overlay" hidden>
+    <div class="overlay-card">
+      <h2>Sessione scaduta</h2>
+      <p>Questa sessione temporanea è stata distrutta in modo definitivo.</p>
+      <a class="primary" href="/">Torna alla home</a>
+    </div>
+  </div>
+  <script>
+    window.__SLUG__ = {{.Slug}};
+  </script>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

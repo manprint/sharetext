@@ -1,0 +1,154 @@
+package main
+
+import (
+	"context"
+	"embed"
+	"errors"
+	"html/template"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+
+	"sharetext/internal/handlers"
+	"sharetext/internal/store"
+)
+
+//go:embed all:templates all:static
+var assets embed.FS
+
+type pageData struct {
+	Slug string
+}
+
+func main() {
+	port := envOr("PORT", "8080")
+	dbPath := envOr("DB_PATH", "sharetext.db")
+	slugLen, _ := strconv.Atoi(envOr("SLUG_LEN", "16"))
+	cleanupInterval, _ := time.ParseDuration(envOr("CLEANUP_INTERVAL", "30s"))
+	if cleanupInterval <= 0 {
+		cleanupInterval = 30 * time.Second
+	}
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		log.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	api := &handlers.API{Store: st, Hub: handlers.NewHub(), SlugLen: slugLen}
+
+	tplFS, err := fs.Sub(assets, "templates")
+	if err != nil {
+		log.Fatalf("templates fs: %v", err)
+	}
+	tpl, err := template.ParseFS(tplFS, "*.html")
+	if err != nil {
+		log.Fatalf("parse templates: %v", err)
+	}
+	staticFS, err := fs.Sub(assets, "static")
+	if err != nil {
+		log.Fatalf("static fs: %v", err)
+	}
+
+	r := chi.NewRouter()
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Timeout(30 * time.Second))
+
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		if err := tpl.ExecuteTemplate(w, "index.html", nil); err != nil {
+			log.Printf("render index: %v", err)
+		}
+	})
+	r.Get("/s/{slug}", func(w http.ResponseWriter, r *http.Request) {
+		slug := chi.URLParam(r, "slug")
+		ok, err := st.Exists(r.Context(), slug)
+		if err != nil {
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if err := tpl.ExecuteTemplate(w, "session.html", pageData{Slug: slug}); err != nil {
+			log.Printf("render session: %v", err)
+		}
+	})
+
+	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+
+	r.Post("/api/sessions", api.CreateSession)
+	r.Get("/api/sessions/{slug}", api.GetSession)
+	r.Put("/api/sessions/{slug}", api.UpdateSession)
+	r.Get("/ws/{slug}", api.WS)
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go runCleanup(ctx, st, cleanupInterval)
+
+	go func() {
+		log.Printf("sharetext listening on :%s (db=%s, cleanup=%s)", port, dbPath, cleanupInterval)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		log.Printf("shutdown: %v", err)
+	}
+}
+
+func runCleanup(ctx context.Context, st *store.Store, every time.Duration) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	doSweep := func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		n, err := st.DeleteExpired(cctx)
+		if err != nil {
+			log.Printf("cleanup: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("cleanup: deleted %d expired session(s)", n)
+		}
+	}
+	doSweep()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			doSweep()
+		}
+	}
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}

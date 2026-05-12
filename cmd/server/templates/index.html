@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sharetext</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="landing">
+    <h1>sharetext</h1>
+    <p>Condivisione di snippet di testo in tempo reale.</p>
+
+    <form id="create-form" class="create-form" novalidate>
+      <fieldset class="mode-fieldset">
+        <legend class="sr-only">Tipo di sessione</legend>
+        <label class="mode">
+          <input type="radio" name="type" value="persistent" checked>
+          <span class="mode-title">Persistente</span>
+          <span class="mode-hint">Resta finché non viene rimossa.</span>
+        </label>
+        <label class="mode">
+          <input type="radio" name="type" value="temporary">
+          <span class="mode-title">Temporanea</span>
+          <span class="mode-hint">Si autodistrugge allo scadere del tempo.</span>
+        </label>
+      </fieldset>
+
+      <div class="field" data-show-for="persistent">
+        <label for="name">Nome sessione</label>
+        <input id="name" name="name" type="text" maxlength="32"
+               pattern="[A-Za-z0-9_\-]+" autocomplete="off"
+               placeholder="es. team-meeting_2026">
+        <small class="hint">Solo lettere, numeri, <code>-</code>, <code>_</code>. 1–32 caratteri. Verrà preposto allo slug.</small>
+      </div>
+
+      <div class="field" data-show-for="temporary" hidden>
+        <label for="minutes">Durata (minuti)</label>
+        <input id="minutes" name="minutes" type="number" min="1" max="10080" step="1" value="30">
+        <small class="hint">Compresa fra 1 minuto e 7 giorni (10080 min). Allo scadere viene cancellata definitivamente.</small>
+      </div>
+
+      <button type="submit" id="create-btn" class="primary">Crea sessione</button>
+      <p id="error" class="error" hidden></p>
+    </form>
+  </main>
+
+  <script>
+    const form = document.getElementById('create-form');
+    const err = document.getElementById('error');
+    const modes = form.querySelectorAll('input[name="type"]');
+    const fields = form.querySelectorAll('.field');
+
+    function syncMode() {
+      const sel = form.querySelector('input[name="type"]:checked').value;
+      fields.forEach(f => {
+        const active = f.dataset.showFor === sel;
+        f.hidden = !active;
+        f.querySelectorAll('input').forEach(inp => { inp.disabled = !active; });
+      });
+    }
+    modes.forEach(m => m.addEventListener('change', syncMode));
+    syncMode();
+
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      err.hidden = true;
+      const type = form.querySelector('input[name="type"]:checked').value;
+      const payload = { type };
+      if (type === 'persistent') {
+        const name = document.getElementById('name').value.trim();
+        if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) {
+          err.textContent = 'Nome non valido. Usa 1-32 caratteri tra lettere, numeri, "-", "_".';
+          err.hidden = false;
+          return;
+        }
+        payload.name = name;
+      } else {
+        const minutes = parseInt(document.getElementById('minutes').value, 10);
+        if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
+          err.textContent = 'Durata non valida. Inserisci un numero di minuti fra 1 e 10080.';
+          err.hidden = false;
+          return;
+        }
+        payload.minutes = minutes;
+      }
+      try {
+        const res = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const msg = (await res.text()).trim() || 'creazione fallita';
+          throw new Error(msg);
+        }
+        const data = await res.json();
+        window.location.href = data.url;
+      } catch (e) {
+        err.textContent = e.message;
+        err.hidden = false;
+      }
+    });
+  </script>
+</body>
+</html>
