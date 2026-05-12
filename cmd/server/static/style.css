@@ -148,6 +148,17 @@ button.ghost:hover { background: var(--row-hover); color: var(--fg); }
   letter-spacing: -0.01em;
 }
 
+.app-version {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--muted);
+  margin-left: 0.35rem;
+  letter-spacing: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  vertical-align: middle;
+}
+.landing h1 .app-version { font-size: 0.9rem; }
+
 .meta { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
 
 .status {
@@ -276,6 +287,23 @@ textarea#content {
   align-items: flex-start;
 }
 .lines li.block:hover { background: #f1f9f6; }
+
+.lines li.file {
+  background: #fff7ed;
+  border-left: 3px solid #f59e0b;
+  padding-left: calc(0.75rem - 3px);
+}
+.lines li.file:hover { background: #ffedd5; }
+.lines .file-info { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+.lines .file-icon { flex-shrink: 0; }
+.lines .file-name { font-weight: 500; word-break: break-all; }
+.lines .file-meta { color: var(--muted); font-size: 0.8em; flex-shrink: 0; }
+
+textarea#content.drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  background: #f0fdfa;
+}
 .lines li.block pre.txt {
   background: var(--bg);
   border: 1px solid var(--border);

@@ -1,6 +1,7 @@
 import { parseBlocks } from './blocks.js';
 import { formatRemaining, msUntil, isExpired } from './countdown.js';
 import { buildFilename, downloadText } from './download.js';
+import { parseFileMarker, buildFileMarker, formatBytes } from './files.js';
 
 const slug = window.__SLUG__;
 const $content = document.getElementById('content');
@@ -9,6 +10,10 @@ const $status = document.getElementById('status');
 const $copyAll = document.getElementById('copy-all');
 const $copyLink = document.getElementById('copy-link');
 const $downloadAll = document.getElementById('download-all');
+const $uploadBtn = document.getElementById('upload-btn');
+const $fileInput = document.getElementById('file-input');
+
+const fileMetaCache = new Map(); // id -> {name, size, mime}
 const $countdown = document.getElementById('countdown');
 const $overlay = document.getElementById('expired-overlay');
 const $session = document.getElementById('session');
@@ -82,12 +87,20 @@ function renderItems(text) {
   }
   items.forEach((item, idx) => {
     const li = document.createElement('li');
-    li.className = item.type === 'block' ? 'item block' : 'item line';
-
     const num = document.createElement('span');
     num.className = 'num';
     num.textContent = String(idx + 1);
 
+    // file marker line → dedicated row
+    if (item.type === 'line') {
+      const fm = parseFileMarker(item.text);
+      if (fm) {
+        renderFileRow(li, num, fm);
+        return;
+      }
+    }
+
+    li.className = item.type === 'block' ? 'item block' : 'item line';
     const txt = document.createElement(item.type === 'block' ? 'pre' : 'span');
     txt.className = 'txt';
     if (item.type === 'block') {
@@ -125,6 +138,39 @@ function renderItems(text) {
     li.append(num, txt, actions);
     $lines.appendChild(li);
   });
+}
+
+function renderFileRow(li, num, fm) {
+  li.className = 'item file';
+  const info = document.createElement('span');
+  info.className = 'txt file-info';
+
+  const icon = document.createElement('span');
+  icon.className = 'file-icon';
+  icon.textContent = '📎';
+
+  const name = document.createElement('span');
+  name.className = 'file-name';
+  name.textContent = fm.name;
+
+  const meta = document.createElement('span');
+  meta.className = 'file-meta';
+  const cached = fileMetaCache.get(fm.id);
+  meta.textContent = cached && Number.isFinite(cached.size) ? formatBytes(cached.size) : '';
+
+  info.append(icon, name, meta);
+
+  const actions = document.createElement('span');
+  actions.className = 'actions';
+  const dl = document.createElement('a');
+  dl.className = 'ghost copy';
+  dl.href = `/api/sessions/${encodeURIComponent(slug)}/files/${encodeURIComponent(fm.id)}`;
+  dl.setAttribute('download', fm.name);
+  dl.textContent = 'Scarica';
+  actions.append(dl);
+
+  li.append(num, info, actions);
+  $lines.appendChild(li);
 }
 
 function applyRemote(content) {
@@ -230,8 +276,159 @@ $copyAll.addEventListener('click', () => copyText($content.value));
 $copyLink.addEventListener('click', () => copyText(location.href));
 if ($downloadAll) {
   $downloadAll.addEventListener('click', () => {
-    downloadText($content.value, buildFilename(slug));
+    // Server-side zip bundle (text + all attachments).
+    window.location.href = `/api/sessions/${encodeURIComponent(slug)}/bundle`;
   });
+}
+
+async function uploadOne(file) {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files`, {
+    method: 'POST',
+    body: fd,
+  });
+  if (res.status === 413) throw new Error(`File troppo grande: ${file.name}`);
+  if (!res.ok) throw new Error(`Upload fallito (${res.status}) per ${file.name}`);
+  const data = await res.json();
+  fileMetaCache.set(data.id, { name: data.filename, size: data.size, mime: data.mime });
+  return data; // { id, filename, size, mime, marker, url }
+}
+
+function caretOffsetFromEvent(ev) {
+  const value = $content.value;
+  let offset = null;
+  if (typeof document.caretPositionFromPoint === 'function') {
+    const pos = document.caretPositionFromPoint(ev.clientX, ev.clientY);
+    if (pos && pos.offsetNode === $content) offset = pos.offset;
+  }
+  if (offset == null && typeof document.caretRangeFromPoint === 'function') {
+    const range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+    if (range) offset = range.startOffset;
+  }
+  if (offset == null) offset = $content.selectionStart || value.length;
+  return Math.min(Math.max(0, offset), value.length);
+}
+
+function startOfLine(text, offset) {
+  if (offset <= 0) return 0;
+  const nl = text.lastIndexOf('\n', offset - 1);
+  return nl === -1 ? 0 : nl + 1;
+}
+
+function insertLines(text, at, lines) {
+  let block = lines.join('\n');
+  // Ensure trailing newline so the marker becomes its own line.
+  if (!block.endsWith('\n')) block += '\n';
+  return text.slice(0, at) + block + text.slice(at);
+}
+
+async function pushContent(text) {
+  // Persist via PUT so the change survives even when the WebSocket is not yet
+  // open (e.g. right after page load on mobile). The server-side hub then
+  // broadcasts to all peers, including this client's WS.
+  lastSent = text;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text }),
+    });
+    if (!res.ok) throw new Error(`PUT ${res.status}`);
+  } catch (e) {
+    // Fallback: try WS path (no-op if WS not open yet).
+    send(text);
+  }
+}
+
+function appendAtEnd(text, lines) {
+  let prefix = text;
+  if (prefix && !prefix.endsWith('\n')) prefix += '\n';
+  let block = lines.join('\n');
+  if (!block.endsWith('\n')) block += '\n';
+  return prefix + block;
+}
+
+async function handleUploads(files, atOffset) {
+  if (!files || files.length === 0) return;
+  const markers = [];
+  const errors = [];
+  for (const f of files) {
+    try {
+      const up = await uploadOne(f);
+      markers.push(up.marker);
+      toast(`Caricato ${up.filename}`);
+    } catch (e) {
+      errors.push(e.message);
+      console.error('upload failed', e);
+    }
+  }
+  if (markers.length > 0) {
+    const value = $content.value;
+    const next = atOffset == null
+      ? appendAtEnd(value, markers)
+      : insertLines(value, startOfLine(value, atOffset), markers);
+    $content.value = next;
+    renderItems(next);
+    await pushContent(next);
+  }
+  if (errors.length > 0) toast(errors.join(' · '));
+}
+
+if ($uploadBtn && $fileInput) {
+  $uploadBtn.addEventListener('click', () => $fileInput.click());
+  $fileInput.addEventListener('change', () => {
+    const files = Array.from($fileInput.files || []);
+    $fileInput.value = '';
+    if (files.length === 0) return;
+    // Append after the last existing line.
+    handleUploads(files, null);
+  });
+}
+
+let dragDepth = 0;
+function onDragEnter(ev) {
+  if (!ev.dataTransfer || !Array.from(ev.dataTransfer.types || []).includes('Files')) return;
+  ev.preventDefault();
+  dragDepth++;
+  $content.classList.add('drag-over');
+}
+function onDragOver(ev) {
+  if (!ev.dataTransfer || !Array.from(ev.dataTransfer.types || []).includes('Files')) return;
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = 'copy';
+}
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) $content.classList.remove('drag-over');
+}
+function onDrop(ev) {
+  if (!ev.dataTransfer || !ev.dataTransfer.files || ev.dataTransfer.files.length === 0) return;
+  ev.preventDefault();
+  dragDepth = 0;
+  $content.classList.remove('drag-over');
+  const offset = caretOffsetFromEvent(ev);
+  handleUploads(Array.from(ev.dataTransfer.files), offset);
+}
+
+$content.addEventListener('dragenter', onDragEnter);
+$content.addEventListener('dragover', onDragOver);
+$content.addEventListener('dragleave', onDragLeave);
+$content.addEventListener('drop', onDrop);
+// Block whole-page drop so a missed target doesn't open the file in a tab.
+window.addEventListener('dragover', (e) => { if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) e.preventDefault(); });
+window.addEventListener('drop', (e) => { if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) e.preventDefault(); });
+
+async function loadFileMeta() {
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files`);
+    if (!res.ok) return;
+    const data = await res.json();
+    (data.files || []).forEach((f) => {
+      fileMetaCache.set(f.id, { name: f.filename, size: f.size, mime: f.mime });
+    });
+    renderItems($content.value);
+  } catch {}
 }
 
 fetch(`/api/sessions/${encodeURIComponent(slug)}`)
@@ -244,4 +441,8 @@ fetch(`/api/sessions/${encodeURIComponent(slug)}`)
   })
   .then((s) => { if (s) applySessionPayload(s); })
   .catch(() => {})
-  .finally(() => { if (!expiredHandled) connect(); });
+  .finally(() => {
+    if (expiredHandled) return;
+    loadFileMeta();
+    connect();
+  });

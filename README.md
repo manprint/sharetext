@@ -31,9 +31,11 @@ Apri http://localhost:8080. Scegli **Persistente** + nome, oppure **Temporanea**
 | `PORT`              | `8080`         | Porta HTTP                                                                 |
 | `DB_PATH`           | `sharetext.db` | File SQLite                                                                |
 | `SLUG_LEN`          | `16`           | Lunghezza della parte random dello slug                                    |
-| `CLEANUP_INTERVAL`  | `30s`          | Frequenza sweep cancellazione sessioni scadute                             |
+| `CLEANUP_INTERVAL`  | `30s`          | Frequenza sweep cancellazione sessioni scadute + allegati orfani           |
+| `FILE_GRACE`        | `60s`          | Finestra di grazia per upload appena fatti (evita race su marker)          |
 | `ADMIN_USER`        | _(unset)_      | Username Basic Auth per `/admin`. Se vuoto, admin disabilitato (503).      |
 | `ADMIN_PASS`        | _(unset)_      | Password Basic Auth per `/admin`. Se vuota, admin disabilitato (503).      |
+| `MAX_FILE_SIZE`     | `10485760`     | Limite massimo upload (byte). Default 10 MiB.                              |
 
 ## API
 
@@ -104,6 +106,64 @@ curl -X POST -H 'content-type: application/json' \
 curl -X POST -H 'content-type: application/json' \
   -d '{"type":"temporary","minutes":5}' \
   http://localhost:8080/api/sessions
+```
+
+## Allegati (file)
+
+Una sessione può ospitare allegati binari. I file vengono memorizzati nel DB (FK `ON DELETE CASCADE` sullo slug, quindi sparisco con la sessione persistente cancellata dall'admin o temporanea scaduta).
+
+### Marker testuale
+
+Ogni allegato è rappresentato nell'editor da una **riga marker** della forma:
+
+```
+[file:<id>:<nome-url-encoded>]
+```
+
+- `id` — identificatore alfanumerico (12 char) generato dal server.
+- `nome` — filename originale, URL-encoded (`encodeURIComponent`) per tollerare spazi, `:`, `]`, accenti.
+
+La riga deve essere intera (eventuali spazi prima/dopo tollerati). I marker possono convivere con righe di testo normali e blocchi (`-----`).
+
+### Caricamento
+
+- **Bottone Upload** (header): apre un selettore file, accoda i marker in fondo al testo.
+- **Drag & drop sull'editor**: i marker vengono inseriti come righe nuove all'inizio della riga in cui è avvenuto il drop (caret risolto via `caretPositionFromPoint`).
+- Limite per file: `MAX_FILE_SIZE` (default 10 MiB) → eccesso → `413 Request Entity Too Large`.
+
+### Download
+
+- **Sezione righe**: ogni marker rende come riga dedicata con icona, nome, dimensione (se disponibile da `/files`), pulsante **Scarica** che fa GET diretto su `/api/sessions/{slug}/files/{id}`.
+- **Bottone "Scarica" di sessione**: scarica un archivio ZIP (`{slug}.zip`) con:
+  - `{slug}.txt` (contenuto raw dell'editor, incluse righe marker)
+  - `files/<filename>` per ogni allegato (nomi duplicati → `name-2.ext`, `name-3.ext`, ...).
+
+### Pulizia DB
+
+La goroutine `runCleanup` esegue ad ogni tick (`CLEANUP_INTERVAL`):
+
+1. `DELETE FROM sessions WHERE expires_at <= now()` (hard delete sessioni temporanee scadute). I file collegati cascade-deleted via FK.
+2. `DeleteOrphanFiles`:
+   - **safety net**: rimuove righe `files` con `session_slug` non più presente in `sessions` (eseguito anche se FK fosse off).
+   - **per-sessione**: per ciascuna sessione attiva, estrae gli ID di marker dal `content` (regex `\[file:(ID):`), elimina i file di quella sessione il cui `id` non compare *e* il cui `created_at <= now() - FILE_GRACE`.
+
+Il grace `FILE_GRACE` (default 60s) protegge gli upload appena fatti il cui marker non è ancora stato propagato via WS/PUT, evitando di cancellare un file che sta per essere referenziato.
+
+### Endpoint REST
+
+| Metodo  | Path                                            | Effetto                                  |
+|---------|-------------------------------------------------|------------------------------------------|
+| POST    | `/api/sessions/{slug}/files`                    | Upload multipart (`file` field)          |
+| GET     | `/api/sessions/{slug}/files`                    | Lista metadata (`{files:[…], count}`)    |
+| GET     | `/api/sessions/{slug}/files/{id}`               | Download binario con `Content-Disposition: attachment` |
+| GET     | `/api/sessions/{slug}/bundle`                   | ZIP con testo + tutti gli allegati       |
+
+```bash
+# upload curl
+curl -F 'file=@/path/to/notes.pdf' http://localhost:8080/api/sessions/<slug>/files
+
+# bundle
+curl -OJ http://localhost:8080/api/sessions/<slug>/bundle
 ```
 
 ## Formato blocchi
@@ -226,6 +286,63 @@ Coperti:
   - parser blocchi (`blocks.test.mjs`): input vuoto, blocchi singoli/multipli/spaiati/vuoti, edge case whitespace.
   - countdown (`countdown.test.mjs`): formattazione `MM:SS`/`HH:MM:SS`, `msUntil`, `isExpired` (incluso persistente = mai scaduto).
   - download (`download.test.mjs`): `safeFilename` (caratteri proibiti, controllo, truncate 80, fallback), `buildFilename` (slug/kind/index, sanitize, defaults).
+
+## Versioning
+
+La versione è esposta da `internal/version.Version` (default `v1.0.0`). È visibile accanto al nome dell'app in tutte le pagine (`index`, `session`, `admin`) e nei log di boot.
+
+Override al build:
+
+```bash
+# locale
+VERSION=v1.2.3 just build
+
+# go nudo
+go build -ldflags "-X sharetext/internal/version.Version=v1.2.3" ./cmd/server
+
+# docker
+docker build --build-arg VERSION=v1.2.3 -t sharetext .
+
+# compose
+VERSION=v1.2.3 docker compose build
+```
+
+### GitHub Actions
+
+Esempio di workflow che esegue una release Docker e inietta il tag come versione:
+
+```yaml
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest
+```
+
+Per build non-Docker da Action (ad es. release binary):
+
+```yaml
+- run: go build -ldflags "-s -w -X sharetext/internal/version.Version=${{ github.ref_name }}" -o sharetext ./cmd/server
+```
 
 ## Docker
 

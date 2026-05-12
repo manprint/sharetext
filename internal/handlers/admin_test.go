@@ -83,6 +83,51 @@ func TestAdminDisabledWhenCredsMissing(t *testing.T) {
 	}
 }
 
+func TestAdminListIncludesFilesSize(t *testing.T) {
+	api, r := newAdminRouter(t, "admin", "secret")
+	ctx := context.Background()
+	if _, err := api.Store.Create(ctx, store.CreateOpts{Slug: "withfiles", Name: "n"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Store.Update(ctx, "withfiles", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Store.AddFile(ctx, "withfiles", "f1", "a.bin", "application/octet-stream", []byte("aaaaa")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.Store.AddFile(ctx, "withfiles", "f2", "b.bin", "application/octet-stream", []byte("bbbbbbb")); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/sessions", nil)
+	req.Header.Set("Authorization", basicAuthHeader("admin", "secret"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	var resp adminListResp
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Sessions) != 1 {
+		t.Fatalf("want 1 session, got %d", len(resp.Sessions))
+	}
+	s := resp.Sessions[0]
+	if s.ContentSize != 5 {
+		t.Errorf("content_size want 5, got %d", s.ContentSize)
+	}
+	if s.FilesSize != 12 {
+		t.Errorf("files_size want 12, got %d", s.FilesSize)
+	}
+	if s.FilesCount != 2 {
+		t.Errorf("files_count want 2, got %d", s.FilesCount)
+	}
+	if s.TotalSize != 17 {
+		t.Errorf("total_size want 17, got %d", s.TotalSize)
+	}
+}
+
 func TestAdminListExcludesExpired(t *testing.T) {
 	api, r := newAdminRouter(t, "admin", "secret")
 	past := time.Now().Add(-time.Hour).UTC()

@@ -1,6 +1,9 @@
 services:
   sharetext:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: "${VERSION:-}"
     image: sharetext:local
     container_name: sharetext
     ports:
@@ -9,7 +12,9 @@ services:
       PORT: "8080"
       DB_PATH: /data/sharetext.db
       SLUG_LEN: "16"
-      CLEANUP_INTERVAL: "30s"
+      CLEANUP_INTERVAL: "60s"
+      FILE_GRACE: "${FILE_GRACE:-60s}"
+      MAX_FILE_SIZE: "${MAX_FILE_SIZE:-10485760}"
       ADMIN_USER: "${ADMIN_USER:-admin}"
       ADMIN_PASS: "${ADMIN_PASS:-changeme}"
     volumes:

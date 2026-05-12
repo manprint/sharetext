@@ -1,8 +1,13 @@
 set shell := ["bash", "-cu"]
 
-binary := "sharetext-server"
-image  := "sharetext:local"
-port   := "8080"
+binary  := "sharetext-server"
+image   := "sharetext:local"
+port    := "8080"
+# Override at invocation: `just version=v1.2.3 build`
+version := env_var_or_default("VERSION", "")
+
+# Compose -ldflags conditionally so a missing VERSION keeps the in-code default.
+ldflags := if version == "" { "-s -w" } else { "-s -w -X sharetext/internal/version.Version=" + version }
 
 default:
     @just --list
@@ -11,9 +16,9 @@ default:
 run:
     go run ./cmd/server
 
-# Build native binary
+# Build native binary (optionally bake VERSION via env)
 build:
-    CGO_ENABLED=0 go build -ldflags="-s -w" -o {{binary}} ./cmd/server
+    CGO_ENABLED=0 go build -ldflags='{{ldflags}}' -o {{binary}} ./cmd/server
 
 # Run Go tests
 test:
@@ -25,7 +30,7 @@ test-race:
 
 # Run JS tests (block parser + countdown + download helpers)
 test-js:
-    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs
+    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs
 
 # Run all tests
 test-all: test test-js

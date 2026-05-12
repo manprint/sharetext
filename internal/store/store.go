@@ -83,7 +83,23 @@ CREATE TABLE IF NOT EXISTS sessions (
 	if err := addColumn(`ALTER TABLE sessions ADD COLUMN expires_at INTEGER`); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at) WHERE expires_at IS NOT NULL`)
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at) WHERE expires_at IS NOT NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY,
+    session_slug TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    data BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (session_slug) REFERENCES sessions(slug) ON DELETE CASCADE
+);`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_slug)`)
 	return err
 }
 
@@ -188,19 +204,28 @@ type SessionSummary struct {
 	Slug        string
 	Name        string
 	ContentSize int
+	FilesSize   int64
+	FilesCount  int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	ExpiresAt   *time.Time
+}
+
+// TotalSize returns text + attachments bytes.
+func (s SessionSummary) TotalSize() int64 {
+	return int64(s.ContentSize) + s.FilesSize
 }
 
 // ListActive returns all non-expired sessions ordered by created_at desc.
 func (s *Store) ListActive(ctx context.Context) ([]SessionSummary, error) {
 	now := time.Now().UTC().Unix()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT slug, name, length(content), created_at, updated_at, expires_at
-		   FROM sessions
-		  WHERE expires_at IS NULL OR expires_at > ?
-		  ORDER BY created_at DESC`, now)
+		`SELECT s.slug, s.name, length(s.content), s.created_at, s.updated_at, s.expires_at,
+		        COALESCE((SELECT SUM(size) FROM files f WHERE f.session_slug = s.slug), 0) AS files_size,
+		        COALESCE((SELECT COUNT(*)  FROM files f WHERE f.session_slug = s.slug), 0) AS files_count
+		   FROM sessions s
+		  WHERE s.expires_at IS NULL OR s.expires_at > ?
+		  ORDER BY s.created_at DESC`, now)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +239,7 @@ func (s *Store) ListActive(ctx context.Context) ([]SessionSummary, error) {
 			updated int64
 			exp     sql.NullInt64
 		)
-		if err := rows.Scan(&it.Slug, &name, &it.ContentSize, &created, &updated, &exp); err != nil {
+		if err := rows.Scan(&it.Slug, &name, &it.ContentSize, &created, &updated, &exp, &it.FilesSize, &it.FilesCount); err != nil {
 			return nil, err
 		}
 		if name.Valid {

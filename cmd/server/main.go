@@ -19,6 +19,7 @@ import (
 
 	"sharetext/internal/handlers"
 	"sharetext/internal/store"
+	"sharetext/internal/version"
 )
 
 //go:embed all:templates all:static
@@ -36,8 +37,19 @@ func main() {
 	if cleanupInterval <= 0 {
 		cleanupInterval = 30 * time.Second
 	}
+	fileGrace, _ := time.ParseDuration(envOr("FILE_GRACE", "60s"))
+	if fileGrace <= 0 {
+		fileGrace = 60 * time.Second
+	}
 	adminUser := os.Getenv("ADMIN_USER")
 	adminPass := os.Getenv("ADMIN_PASS")
+	if v := os.Getenv("MAX_FILE_SIZE"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			handlers.MaxFileSize = n
+		} else {
+			log.Printf("invalid MAX_FILE_SIZE %q, keeping default %d", v, handlers.MaxFileSize)
+		}
+	}
 
 	st, err := store.Open(dbPath)
 	if err != nil {
@@ -51,7 +63,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("templates fs: %v", err)
 	}
-	tpl, err := template.ParseFS(tplFS, "*.html")
+	tpl := template.New("").Funcs(template.FuncMap{
+		"version": func() string { return version.Version },
+	})
+	tpl, err = tpl.ParseFS(tplFS, "*.html")
 	if err != nil {
 		log.Fatalf("parse templates: %v", err)
 	}
@@ -94,6 +109,10 @@ func main() {
 	r.Get("/api/sessions/{slug}", api.GetSession)
 	r.Put("/api/sessions/{slug}", api.UpdateSession)
 	r.Get("/ws/{slug}", api.WS)
+	r.Post("/api/sessions/{slug}/files", api.UploadFile)
+	r.Get("/api/sessions/{slug}/files", api.ListFiles)
+	r.Get("/api/sessions/{slug}/files/{id}", api.DownloadFile)
+	r.Get("/api/sessions/{slug}/bundle", api.Bundle)
 
 	adminAuth := handlers.BasicAuth(adminUser, adminPass, "sharetext-admin")
 	r.Group(func(g chi.Router) {
@@ -116,14 +135,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go runCleanup(ctx, st, cleanupInterval)
+	go runCleanup(ctx, st, cleanupInterval, fileGrace)
 
 	go func() {
 		adminMode := "disabled"
 		if adminUser != "" && adminPass != "" {
 			adminMode = "enabled (user=" + adminUser + ")"
 		}
-		log.Printf("sharetext listening on :%s (db=%s, cleanup=%s, admin=%s)", port, dbPath, cleanupInterval, adminMode)
+		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, file_grace=%s, admin=%s, max_file=%dB)", version.Version, port, dbPath, cleanupInterval, fileGrace, adminMode, handlers.MaxFileSize)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}
@@ -138,19 +157,21 @@ func main() {
 	}
 }
 
-func runCleanup(ctx context.Context, st *store.Store, every time.Duration) {
+func runCleanup(ctx context.Context, st *store.Store, every, fileGrace time.Duration) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	doSweep := func() {
-		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		n, err := st.DeleteExpired(cctx)
-		if err != nil {
-			log.Printf("cleanup: %v", err)
-			return
-		}
-		if n > 0 {
+		if n, err := st.DeleteExpired(cctx); err != nil {
+			log.Printf("cleanup sessions: %v", err)
+		} else if n > 0 {
 			log.Printf("cleanup: deleted %d expired session(s)", n)
+		}
+		if n, err := st.DeleteOrphanFiles(cctx, fileGrace); err != nil {
+			log.Printf("cleanup files: %v", err)
+		} else if n > 0 {
+			log.Printf("cleanup: deleted %d orphan file(s)", n)
 		}
 	}
 	doSweep()

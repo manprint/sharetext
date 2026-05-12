@@ -74,7 +74,11 @@
       typeCell.appendChild(tag);
       tr.appendChild(typeCell);
 
-      tr.appendChild(makeCell(fmtSize(s.content_size), '', 'Size'));
+      const totalSize = (s.total_size != null) ? s.total_size : (s.content_size + (s.files_size || 0));
+      const sizeLabel = s.files_count > 0
+        ? `${fmtSize(totalSize)} (${fmtSize(s.content_size)} testo + ${fmtSize(s.files_size || 0)} in ${s.files_count} file)`
+        : fmtSize(totalSize);
+      tr.appendChild(makeCell(sizeLabel, '', 'Size'));
       tr.appendChild(makeCell(fmtDate(s.created_at), '', 'Creata'));
       tr.appendChild(makeCell(fmtDate(s.updated_at), '', 'Aggiornata'));
       tr.appendChild(makeCell(s.expires_at ? fmtDate(s.expires_at) : '—', s.expires_at ? '' : 'muted', 'Scade'));

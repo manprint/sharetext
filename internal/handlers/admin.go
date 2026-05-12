@@ -48,6 +48,9 @@ type adminSession struct {
 	Name        string     `json:"name,omitempty"`
 	Type        string     `json:"type"`
 	ContentSize int        `json:"content_size"`
+	FilesSize   int64      `json:"files_size"`
+	FilesCount  int        `json:"files_count"`
+	TotalSize   int64      `json:"total_size"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
@@ -76,6 +79,9 @@ func (a *API) AdminList(w http.ResponseWriter, r *http.Request) {
 			Name:        it.Name,
 			Type:        typ,
 			ContentSize: it.ContentSize,
+			FilesSize:   it.FilesSize,
+			FilesCount:  it.FilesCount,
+			TotalSize:   it.TotalSize(),
 			CreatedAt:   it.CreatedAt,
 			UpdatedAt:   it.UpdatedAt,
 			ExpiresAt:   it.ExpiresAt,

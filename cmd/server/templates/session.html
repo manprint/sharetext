@@ -9,14 +9,16 @@
 </head>
 <body>
   <header class="bar">
-    <a href="/" class="brand">sharetext</a>
+    <a href="/" class="brand">sharetext <span class="app-version">{{version}}</span></a>
     <div class="meta">
       <span id="countdown" class="countdown" hidden></span>
       <span class="status" id="status">offline</span>
       <button id="toggle-view" class="mobile-only" type="button" aria-pressed="false">Modifica</button>
       <button id="copy-link">Copia link</button>
+      <button id="upload-btn" type="button">Upload</button>
       <button id="download-all">Scarica</button>
       <button id="copy-all" class="primary">Copia tutto</button>
+      <input id="file-input" type="file" multiple class="sr-only" aria-hidden="true" tabindex="-1">
     </div>
   </header>
   <main id="session" class="session">
