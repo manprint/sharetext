@@ -265,6 +265,7 @@ textarea#content {
 .lines .num { color: var(--muted); width: 2.5em; text-align: right; user-select: none; padding-top: 2px; }
 .lines .txt { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; margin: 0; font: inherit; }
 .lines .empty { color: var(--muted); font-style: italic; }
+.lines .actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
 .lines .copy { opacity: 0; transition: opacity 0.1s; flex-shrink: 0; }
 .lines li:hover .copy { opacity: 1; }
 

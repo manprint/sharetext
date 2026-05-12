@@ -23,9 +23,9 @@ test:
 test-race:
     go test -race ./... -count=1
 
-# Run JS tests (block parser + countdown helpers)
+# Run JS tests (block parser + countdown + download helpers)
 test-js:
-    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs
+    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs
 
 # Run all tests
 test-all: test test-js

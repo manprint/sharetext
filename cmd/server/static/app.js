@@ -1,5 +1,6 @@
 import { parseBlocks } from './blocks.js';
 import { formatRemaining, msUntil, isExpired } from './countdown.js';
+import { buildFilename, downloadText } from './download.js';
 
 const slug = window.__SLUG__;
 const $content = document.getElementById('content');
@@ -7,6 +8,7 @@ const $lines = document.getElementById('lines');
 const $status = document.getElementById('status');
 const $copyAll = document.getElementById('copy-all');
 const $copyLink = document.getElementById('copy-link');
+const $downloadAll = document.getElementById('download-all');
 const $countdown = document.getElementById('countdown');
 const $overlay = document.getElementById('expired-overlay');
 const $session = document.getElementById('session');
@@ -94,12 +96,33 @@ function renderItems(text) {
       txt.textContent = item.text === '' ? ' ' : item.text;
     }
 
-    const btn = document.createElement('button');
-    btn.className = 'ghost copy';
-    btn.textContent = item.type === 'block' ? 'Copia blocco' : 'Copia';
-    btn.addEventListener('click', () => copyText(item.text));
+    const isEmptyLine = item.type === 'line' && item.text === '';
+    if (isEmptyLine) {
+      li.append(num, txt);
+      $lines.appendChild(li);
+      return;
+    }
 
-    li.append(num, txt, btn);
+    const actions = document.createElement('span');
+    actions.className = 'actions';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'ghost copy';
+    copyBtn.type = 'button';
+    copyBtn.textContent = item.type === 'block' ? 'Copia blocco' : 'Copia';
+    copyBtn.addEventListener('click', () => copyText(item.text));
+
+    const dlBtn = document.createElement('button');
+    dlBtn.className = 'ghost copy';
+    dlBtn.type = 'button';
+    dlBtn.textContent = item.type === 'block' ? 'Scarica blocco' : 'Scarica';
+    dlBtn.addEventListener('click', () => {
+      const kind = item.type === 'block' ? 'blocco' : 'riga';
+      downloadText(item.text, buildFilename(slug, kind, idx + 1));
+    });
+
+    actions.append(copyBtn, dlBtn);
+    li.append(num, txt, actions);
     $lines.appendChild(li);
   });
 }
@@ -205,6 +228,11 @@ $content.addEventListener('input', () => {
 
 $copyAll.addEventListener('click', () => copyText($content.value));
 $copyLink.addEventListener('click', () => copyText(location.href));
+if ($downloadAll) {
+  $downloadAll.addEventListener('click', () => {
+    downloadText($content.value, buildFilename(slug));
+  });
+}
 
 fetch(`/api/sessions/${encodeURIComponent(slug)}`)
   .then((r) => {
