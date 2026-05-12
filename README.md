@@ -363,7 +363,7 @@ Esempio JSON `/admin/api/sessions`:
 - `files_count`: numero di allegati.
 - `total_size`: `content_size + files_size`.
 
-La UI mostra la dimensione totale e, se ci sono file, il breakdown `"1.4 KB (421 B testo + 1.0 KB in 2 file)"`.
+La UI mostra solo `total_size` nella colonna Size.
 
 ```bash
 curl -u admin:secret http://localhost:8080/admin/api/sessions
