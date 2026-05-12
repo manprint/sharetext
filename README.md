@@ -1,30 +1,109 @@
 # sharetext
 
-Webapp minimale per condividere snippet di testo in tempo reale. Backend Go, persistenza SQLite, sync via WebSocket, frontend vanilla JS.
+Webapp per condividere snippet di testo (e file) in tempo reale.
+Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanilla JS.
+
+## Indice
+
+- [Caratteristiche](#caratteristiche)
+- [Avvio rapido](#avvio-rapido)
+- [Variabili d'ambiente](#variabili-dambiente)
+- [API sessioni](#api-sessioni)
+- [Allegati (file)](#allegati-file)
+- [Formato blocchi](#formato-blocchi)
+- [Vista righe & UI mobile](#vista-righe--ui-mobile)
+- [Admin](#admin)
+- [Sessioni temporanee — scadenza](#sessioni-temporanee--scadenza)
+- [Pulizia DB](#pulizia-db)
+- [Versioning](#versioning)
+- [Test](#test)
+- [Docker](#docker)
+- [Struttura](#struttura)
+
+---
 
 ## Caratteristiche
 
-- Due modalità di sessione:
-  - **Persistente**: nome obbligatorio (regex `^[A-Za-z0-9_-]{1,32}$`), preposto allo slug random. Resta finché non viene rimossa.
-  - **Temporanea**: durata obbligatoria in minuti (1..10080). Allo scadere viene cancellata in modo definitivo dal DB (hard delete via goroutine periodica).
-- Slug univoco crypto-random; per le persistenti la forma finale è `{nome}-{random}`.
-- Chiunque conosce il link può leggere e scrivere.
-- Sync in tempo reale tra client (WebSocket), con copia automatica dello stato iniziale alla connessione.
-- Countdown visibile in pagina durante una sessione temporanea; al raggiungimento dello zero overlay "Sessione scaduta" e disconnessione.
-- Copia tutto, copia singola riga, copia blocco multi-riga (vedi [Formato blocchi](#formato-blocchi)).
-- Persistenza su SQLite (WAL).
+**Sessioni**
+
+- Due modalità a scelta nella landing page:
+  - **Persistente** — nome obbligatorio (regex `^[A-Za-z0-9_-]{1,32}$`), preposto allo slug random (forma finale `{nome}-{rand}`). Resta finché non viene rimossa dall'admin.
+  - **Temporanea** — durata obbligatoria in minuti (1..10080 = 7 giorni). Allo scadere viene hard-deleted, irrecuperabile.
+- Slug crypto-random base58-ish (alfabeto senza caratteri ambigui).
+- Chiunque conosce il link legge e scrive.
+- Persistenza su SQLite (modalità WAL, FK abilitate).
+
+**Sync realtime**
+
+- WebSocket per ogni stanza (`/ws/{slug}`).
+- Hub server-side: broadcast a tutti i peer della stessa sessione su ogni update.
+- Stato iniziale inviato sulla connessione.
+- Last-write-wins.
+
+**Editor**
+
+- Textarea + pannello "righe" affiancato (desktop) o impilato (mobile, single column).
+- **Copia/Scarica per riga**, **Copia/Scarica per blocco multi-riga**, **Copia/Scarica tutto** in toolbar.
+- Sintassi blocchi `-----` per raggruppare più righe in un'unica voce.
+- Countdown live nell'header per sessioni temporanee; overlay "Sessione scaduta" allo zero.
+
+**Allegati**
+
+- Upload via bottone (selettore file, accoda alla fine del testo) o **drag & drop** sull'editor (inserisce nella riga dove avviene il drop).
+- Marker testuale `[file:<id>:<url-encoded-name>]` reso come riga speciale nel pannello righe (icona 📎, nome, size, download).
+- Download per singolo file dalla riga, oppure **bundle ZIP** (testo + tutti gli allegati) tramite il pulsante Scarica di sessione.
+- Limite per upload configurabile (`MAX_FILE_SIZE`).
+- File cascade-deleted con la sessione; orfani (marker rimossi dal testo) ripuliti dal cleanup periodico con grace window.
+
+**Admin**
+
+- Pannello `/admin` protetto da HTTP Basic Auth (confronto costante via `crypto/subtle`).
+- Elenco sessioni attive con metadata: tipo, dimensione (testo + somma allegati), creata/aggiornata/scade.
+- Eliminazione singola sessione (hard delete, FK cascade rimuove anche i file).
+
+**Mobile**
+
+- Layout responsivo, breakpoint ≤800px (single column) e ≤640px (zoom 90%, padding ridotti, hit-target più ampi, no auto-zoom su focus input/textarea).
+- Pulsante toggle "Modifica" ↔ "Righe": di default su mobile vede solo la lista, l'editor compare dopo il toggle.
+- Tabella admin mobile → cards verticali via `data-label`.
+- `caretPositionFromPoint` + fallback `caretRangeFromPoint` per drag-drop.
+
+**Versioning**
+
+- `internal/version.Version` (default `v1.0.0`), mostrato accanto al nome app in tutte le pagine e nei log di boot.
+- Override a build-time via `-ldflags` o `--build-arg VERSION=` (pronto per GitHub Actions tag-driven).
+
+**Pulizia**
+
+- Goroutine ogni `CLEANUP_INTERVAL`: hard-delete sessioni scadute + sweep file orfani (con grace).
+- DB sempre normalizzato; safety net SQL anche se le FK fossero off.
+
+**Docker**
+
+- Image distroless `static:nonroot`, binary statico, volume `/data` con perms preallocate per UID 65532.
+- Compose pronto, supporto build-arg per versione.
+
+---
 
 ## Avvio rapido
 
 ```bash
+# Run locale
 go run ./cmd/server
 # oppure
 just run
+
+# Run via Docker compose
+just up        # build + start
+just smoke     # health checks contro :8080
+just down
 ```
 
-Apri http://localhost:8080. Scegli **Persistente** + nome, oppure **Temporanea** + durata in minuti.
+Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) o **Temporanea** (richiede minuti). Il browser viene reindirizzato su `/s/{slug}`.
 
-### Variabili d'ambiente
+---
+
+## Variabili d'ambiente
 
 | Variabile           | Default        | Descrizione                                                                |
 |---------------------|----------------|----------------------------------------------------------------------------|
@@ -33,15 +112,19 @@ Apri http://localhost:8080. Scegli **Persistente** + nome, oppure **Temporanea**
 | `SLUG_LEN`          | `16`           | Lunghezza della parte random dello slug                                    |
 | `CLEANUP_INTERVAL`  | `30s`          | Frequenza sweep cancellazione sessioni scadute + allegati orfani           |
 | `FILE_GRACE`        | `60s`          | Finestra di grazia per upload appena fatti (evita race su marker)          |
+| `MAX_FILE_SIZE`     | `10485760`     | Limite massimo upload (byte). Default 10 MiB.                              |
 | `ADMIN_USER`        | _(unset)_      | Username Basic Auth per `/admin`. Se vuoto, admin disabilitato (503).      |
 | `ADMIN_PASS`        | _(unset)_      | Password Basic Auth per `/admin`. Se vuota, admin disabilitato (503).      |
-| `MAX_FILE_SIZE`     | `10485760`     | Limite massimo upload (byte). Default 10 MiB.                              |
 
-## API
+Compose passa tutto via env override (`${VAR:-default}`).
+
+---
+
+## API sessioni
 
 ### `POST /api/sessions`
 
-Crea una sessione. Il body è JSON obbligatorio:
+Crea una sessione. Body JSON obbligatorio:
 
 ```jsonc
 // Persistente
@@ -53,22 +136,20 @@ Crea una sessione. Il body è JSON obbligatorio:
 
 Validazione:
 
-- `type` deve essere `persistent` o `temporary`.
-- `name`: 1–32 caratteri, solo `[A-Za-z0-9_-]`. Obbligatorio per `persistent`, rifiutato (ignorato) per `temporary`.
-- `minutes`: intero in `[1, 10080]`. Obbligatorio per `temporary`.
+- `type` ∈ `{persistent, temporary}`.
+- `name`: 1–32 caratteri, solo `[A-Za-z0-9_-]`. Obbligatorio per persistent.
+- `minutes`: intero in `[1, 10080]`. Obbligatorio per temporary.
 
 Risposta `201 Created`:
 
 ```jsonc
 {
   "slug": "team-alpha-3vRdM58dftguriSe",
-  "url": "/s/team-alpha-3vRdM58dftguriSe",
-  "name": "team-alpha",
-  "expires_at": null
+  "url":  "/s/team-alpha-3vRdM58dftguriSe",
+  "name": "team-alpha",            // omesso se temporary
+  "expires_at": null               // ISO-8601 UTC se temporary
 }
 ```
-
-Per le temporanee `name` è omesso e `expires_at` è un timestamp RFC3339 in UTC.
 
 Errori: `400 Bad Request` su validazione, `500` su errore interno.
 
@@ -77,10 +158,10 @@ Errori: `400 Bad Request` su validazione, `500` su errore interno.
 ```jsonc
 {
   "slug": "...",
-  "name": "team-alpha",            // omesso per le temporanee
+  "name": "team-alpha",                  // omesso per le temporanee
   "content": "...",
   "updated_at": "2026-05-12T14:00:00Z",
-  "expires_at": "2026-05-12T15:00:00Z"  // omesso per le persistenti
+  "expires_at": "2026-05-12T15:00:00Z"   // omesso per le persistenti
 }
 ```
 
@@ -88,11 +169,11 @@ Codici: `200` ok, `404` sconosciuto, `410 Gone` quando la sessione è scaduta (a
 
 ### `PUT /api/sessions/{slug}`
 
-Body `{"content": "..."}`. Stessi codici di GET (`200/400/404/410`). In caso di successo broadcast su tutti i WebSocket attivi della stessa stanza.
+Body `{"content": "..."}`. Stessi codici (`200/400/404/410`). Sul successo il server fa broadcast su tutti i WebSocket attivi della stessa stanza.
 
-### `GET /ws/{slug}` (WebSocket)
+### `GET /ws/{slug}` — WebSocket
 
-Messaggi JSON `{"content": "..."}` in entrambe le direzioni. Il server invia lo stato iniziale alla connessione e fa broadcast a tutti i peer ad ogni update. Connessione rifiutata con `404` se lo slug è inesistente o scaduto.
+Messaggi JSON `{"content": "..."}` in entrambe le direzioni. Stato iniziale inviato alla connessione. Connessione rifiutata con `404` se lo slug non esiste o è scaduto.
 
 ### Esempi
 
@@ -106,71 +187,71 @@ curl -X POST -H 'content-type: application/json' \
 curl -X POST -H 'content-type: application/json' \
   -d '{"type":"temporary","minutes":5}' \
   http://localhost:8080/api/sessions
+
+# Update contenuto
+curl -X PUT -H 'content-type: application/json' \
+  -d '{"content":"hello"}' \
+  http://localhost:8080/api/sessions/<slug>
 ```
+
+---
 
 ## Allegati (file)
 
-Una sessione può ospitare allegati binari. I file vengono memorizzati nel DB (FK `ON DELETE CASCADE` sullo slug, quindi sparisco con la sessione persistente cancellata dall'admin o temporanea scaduta).
+Una sessione può ospitare allegati binari. Vengono memorizzati nel DB con FK `ON DELETE CASCADE` sullo slug, quindi spariscono insieme alla sessione (admin delete o scadenza temporanea).
 
 ### Marker testuale
 
-Ogni allegato è rappresentato nell'editor da una **riga marker** della forma:
+Ogni allegato è rappresentato nell'editor da una **riga marker**:
 
 ```
-[file:<id>:<nome-url-encoded>]
+[file:<id>:<url-encoded-name>]
 ```
 
-- `id` — identificatore alfanumerico (12 char) generato dal server.
-- `nome` — filename originale, URL-encoded (`encodeURIComponent`) per tollerare spazi, `:`, `]`, accenti.
+- `id` — alfanumerico (12 char) generato dal server.
+- `name` — filename originale, URL-encoded (`encodeURIComponent`) per tollerare spazi, `:`, `]`, accenti.
 
-La riga deve essere intera (eventuali spazi prima/dopo tollerati). I marker possono convivere con righe di testo normali e blocchi (`-----`).
+La riga deve essere intera (spazi prima/dopo tollerati). I marker possono convivere con righe normali e blocchi `-----`.
 
 ### Caricamento
 
-- **Bottone Upload** (header): apre un selettore file, accoda i marker in fondo al testo.
-- **Drag & drop sull'editor**: i marker vengono inseriti come righe nuove all'inizio della riga in cui è avvenuto il drop (caret risolto via `caretPositionFromPoint`).
+- **Bottone Upload** (header): apre selettore file, accoda i marker dopo l'ultima riga (con `\n` separatore).
+- **Drag & drop sull'editor**: i marker vengono inseriti come righe nuove all'inizio della riga in cui è avvenuto il drop (caret risolto via `caretPositionFromPoint` + fallback `caretRangeFromPoint`, ultimo fallback fine testo).
+- Persistenza: dopo l'upload il client fa `PUT /api/sessions/{slug}` esplicita (più affidabile del solo WS, soprattutto su mobile dove la connessione può non essere ancora aperta), e il server fa broadcast a tutti i peer.
 - Limite per file: `MAX_FILE_SIZE` (default 10 MiB) → eccesso → `413 Request Entity Too Large`.
 
 ### Download
 
-- **Sezione righe**: ogni marker rende come riga dedicata con icona, nome, dimensione (se disponibile da `/files`), pulsante **Scarica** che fa GET diretto su `/api/sessions/{slug}/files/{id}`.
-- **Bottone "Scarica" di sessione**: scarica un archivio ZIP (`{slug}.zip`) con:
-  - `{slug}.txt` (contenuto raw dell'editor, incluse righe marker)
+- **Sezione righe**: ogni marker rende come riga `.file` con icona 📎, nome, dimensione (da `/files`), pulsante **Scarica** → GET diretto su `/api/sessions/{slug}/files/{id}`.
+- **Bottone "Scarica" di sessione**: zip server-side `{slug}.zip` con:
+  - `{slug}.txt` (contenuto raw dell'editor, marker compresi).
   - `files/<filename>` per ogni allegato (nomi duplicati → `name-2.ext`, `name-3.ext`, ...).
 
-### Pulizia DB
-
-La goroutine `runCleanup` esegue ad ogni tick (`CLEANUP_INTERVAL`):
-
-1. `DELETE FROM sessions WHERE expires_at <= now()` (hard delete sessioni temporanee scadute). I file collegati cascade-deleted via FK.
-2. `DeleteOrphanFiles`:
-   - **safety net**: rimuove righe `files` con `session_slug` non più presente in `sessions` (eseguito anche se FK fosse off).
-   - **per-sessione**: per ciascuna sessione attiva, estrae gli ID di marker dal `content` (regex `\[file:(ID):`), elimina i file di quella sessione il cui `id` non compare *e* il cui `created_at <= now() - FILE_GRACE`.
-
-Il grace `FILE_GRACE` (default 60s) protegge gli upload appena fatti il cui marker non è ancora stato propagato via WS/PUT, evitando di cancellare un file che sta per essere referenziato.
-
-### Endpoint REST
+### Endpoint REST file
 
 | Metodo  | Path                                            | Effetto                                  |
 |---------|-------------------------------------------------|------------------------------------------|
 | POST    | `/api/sessions/{slug}/files`                    | Upload multipart (`file` field)          |
 | GET     | `/api/sessions/{slug}/files`                    | Lista metadata (`{files:[…], count}`)    |
-| GET     | `/api/sessions/{slug}/files/{id}`               | Download binario con `Content-Disposition: attachment` |
-| GET     | `/api/sessions/{slug}/bundle`                   | ZIP con testo + tutti gli allegati       |
+| GET     | `/api/sessions/{slug}/files/{id}`               | Download binario con `Content-Disposition: attachment; filename="..."; filename*=UTF-8''...` |
+| GET     | `/api/sessions/{slug}/bundle`                   | ZIP testo + allegati                      |
 
 ```bash
-# upload curl
+# upload
 curl -F 'file=@/path/to/notes.pdf' http://localhost:8080/api/sessions/<slug>/files
 
-# bundle
+# download singolo
+curl -OJ http://localhost:8080/api/sessions/<slug>/files/<id>
+
+# bundle ZIP
 curl -OJ http://localhost:8080/api/sessions/<slug>/bundle
 ```
 
+---
+
 ## Formato blocchi
 
-Nell'editor un gruppo di righe può essere marcato come **blocco** racchiudendolo tra due righe contenenti esattamente `-----` (ammessi spazi a inizio/fine). Nel pannello a destra il blocco viene mostrato come **un'unica voce** con un solo pulsante "Copia blocco" che copia il contenuto interno (delimitatori esclusi).
-
-Esempio:
+Un gruppo di righe può essere marcato come **blocco** racchiudendolo fra due righe contenenti esattamente `-----` (ammessi spazi a inizio/fine). Nel pannello righe il blocco viene mostrato come **un'unica voce** con bottoni `Copia blocco` / `Scarica blocco` che agiscono sul contenuto interno (delimitatori esclusi).
 
 ```
 prima riga
@@ -192,23 +273,49 @@ Render:
 
 Regole:
 
-- I delimitatori (`-----`) non sono inclusi nel testo copiato del blocco.
-- Un delimitatore "spaiato" (numero dispari di `-----`) resta una riga normale.
+- Delimitatori `-----` non inclusi nel contenuto copiato/scaricato del blocco.
+- Delimitatore "spaiato" (numero dispari di `-----`) resta una riga normale.
 - Due `-----` consecutivi formano un blocco vuoto.
 - Una riga che *contiene* `-----` ma non è composta solo da `-----` (con eventuali spazi) NON è un delimitatore.
 - Il pulsante **Copia tutto** copia il contenuto raw dell'editor, delimitatori compresi (preserva round-trip).
+- **Righe vuote**: niente bottoni Copia/Scarica.
+- **Marker file** dentro un blocco: l'intero blocco resta `block`, il marker non viene riconosciuto come riga file (coerente con la natura "raw" dei blocchi).
+
+---
+
+## Vista righe & UI mobile
+
+**Desktop** — layout a due colonne: editor a sinistra, pannello righe a destra. Pulsanti Copia/Scarica delle voci visibili in hover.
+
+**Mobile** (≤800px):
+
+- Layout single column.
+- Vista **righe** mostrata di default; nessun editor finché l'utente preme il pulsante header `Modifica`. Re-click → `Righe`. Lo switch è puramente CSS (`.session.editing`) + classe aggiunta via JS.
+- Tutti i pulsanti Copia/Scarica sempre visibili (`@media (hover: none)`).
+- `input[type=file]` posizionato off-screen (`.sr-only`) anziché `display:none` → `.click()` programmatica funziona su iOS Safari.
+
+**Mobile compact** (≤640px):
+
+- `body { zoom: 0.9 }` per scaling uniforme.
+- Font input/textarea forzato a 16px → niente auto-zoom iOS al focus.
+- Tabella admin → cards verticali via `data-label` su ogni `<td>` (`thead` nascosto).
+- Hit-target ≥38px sui bottoni header, ≥42px sul pulsante Elimina admin.
+
+Viewport meta: `width=device-width, initial-scale=1, viewport-fit=cover`. `theme-color: #0f766e` per UI di sistema (status bar mobile, browser chrome).
+
+---
 
 ## Admin
 
-Pannello di amministrazione su `/admin`, protetto da HTTP Basic Auth. Mostra tutte le sessioni non scadute (persistenti + temporanee ancora attive) con metadata: slug, nome, tipo, dimensione contenuto, timestamp di creazione/aggiornamento, scadenza. Pulsante **Elimina** rimuove la sessione in modo definitivo (hard delete, irreversibile).
+Pannello `/admin` protetto da HTTP Basic Auth. Mostra tutte le sessioni non scadute con metadata completi e pulsante **Elimina** (hard delete + FK cascade su files).
 
 ### Abilitazione
 
-Setta entrambe le variabili `ADMIN_USER` e `ADMIN_PASS`. Se una è vuota, qualsiasi richiesta sotto `/admin` risponde con `503 Service Unavailable` (admin disabilitato).
+Setta entrambe le variabili `ADMIN_USER` e `ADMIN_PASS`. Se una è vuota, qualsiasi richiesta sotto `/admin` risponde `503 Service Unavailable`.
 
 ```bash
 ADMIN_USER=admin ADMIN_PASS=secret just run
-# oppure via compose: si configurano in compose.yaml (override .env)
+# via compose: override in compose.yaml o tramite .env nella stessa cartella
 ```
 
 ### Endpoints
@@ -217,7 +324,7 @@ ADMIN_USER=admin ADMIN_PASS=secret just run
 |---------|-----------------------------------|------------------------------------------|
 | GET     | `/admin`                          | HTML del pannello                        |
 | GET     | `/admin/api/sessions`             | JSON elenco sessioni attive              |
-| DELETE  | `/admin/api/sessions/{slug}`      | Elimina sessione (hard delete)           |
+| DELETE  | `/admin/api/sessions/{slug}`      | Elimina sessione (hard delete + cascade) |
 
 Esempio JSON `/admin/api/sessions`:
 
@@ -230,6 +337,9 @@ Esempio JSON `/admin/api/sessions`:
       "name": "team-alpha",
       "type": "persistent",
       "content_size": 421,
+      "files_size": 1024,
+      "files_count": 2,
+      "total_size": 1445,
       "created_at": "2026-05-12T14:00:00Z",
       "updated_at": "2026-05-12T14:05:32Z"
     },
@@ -237,6 +347,9 @@ Esempio JSON `/admin/api/sessions`:
       "slug": "p3zXjUUcvc9SPRdX",
       "type": "temporary",
       "content_size": 0,
+      "files_size": 0,
+      "files_count": 0,
+      "total_size": 0,
       "created_at": "2026-05-12T14:09:21Z",
       "updated_at": "2026-05-12T14:09:21Z",
       "expires_at": "2026-05-12T14:39:21Z"
@@ -245,56 +358,66 @@ Esempio JSON `/admin/api/sessions`:
 }
 ```
 
-Esempio curl:
+- `content_size`: byte del testo.
+- `files_size`: somma dei byte di tutti gli allegati della sessione.
+- `files_count`: numero di allegati.
+- `total_size`: `content_size + files_size`.
+
+La UI mostra la dimensione totale e, se ci sono file, il breakdown `"1.4 KB (421 B testo + 1.0 KB in 2 file)"`.
 
 ```bash
 curl -u admin:secret http://localhost:8080/admin/api/sessions
-curl -u admin:secret -X DELETE http://localhost:8080/admin/api/sessions/team-alpha-XYZ
+curl -u admin:secret -X DELETE http://localhost:8080/admin/api/sessions/<slug>
 ```
 
 Note di sicurezza:
 
-- Le credenziali vengono confrontate in tempo costante (`crypto/subtle`).
+- Credenziali confrontate in tempo costante (`crypto/subtle`).
 - Basic Auth viaggia in chiaro: dietro reverse proxy usare sempre HTTPS.
 - Le sessioni scadute non compaiono in lista (filtrate via SQL `expires_at IS NULL OR expires_at > now`).
 
-## Sessioni temporanee — comportamento di scadenza
+---
+
+## Sessioni temporanee — scadenza
 
 - `expires_at` viene calcolato server-side al `POST /api/sessions` come `now + minutes*60s` (UTC).
 - Ogni `GET`/`PUT`/`WS` controlla l'`expires_at` correntemente in DB: una sessione scaduta restituisce `410 Gone` anche prima che il job di cleanup la rimuova.
-- Una goroutine eseguita ogni `CLEANUP_INTERVAL` (default 30s) lancia `DELETE FROM sessions WHERE expires_at <= now()` — **hard delete, non recuperabile**.
+- Una goroutine eseguita ogni `CLEANUP_INTERVAL` lancia `DELETE FROM sessions WHERE expires_at <= now()` — **hard delete, non recuperabile**.
 - In UI:
   - countdown live nell'header con formato `MM:SS` (o `HH:MM:SS` oltre l'ora);
-  - colore arancione nell'ultimo minuto;
+  - colore arancione nell'ultimo minuto, rosso allo zero;
   - allo zero appare un overlay "Sessione scaduta", editor disabilitato, WebSocket chiuso.
 
-## Test
+---
 
-```bash
-just test-all      # Go + JS
-# oppure separati:
-go test ./...
-node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs
-```
+## Pulizia DB
 
-Coperti:
-- **Go**:
-  - `internal/session`: generatore slug, regex nome (validi/invalidi/edge case lunghezza), composizione `Compose(name)`.
-  - `internal/store`: CRUD, duplicati, concorrenza, `expires_at` (Get/Update restituiscono `ErrExpired`), `DeleteExpired` (hard delete con scenari misti), `Delete`.
-  - `internal/handlers`: API HTTP (httptest) — persistente con/senza nome valido, temporanea con/senza minutes validi, 410 su sessione scaduta, hub broadcast, WebSocket end-to-end.
-- **JS** (`node:test`):
-  - parser blocchi (`blocks.test.mjs`): input vuoto, blocchi singoli/multipli/spaiati/vuoti, edge case whitespace.
-  - countdown (`countdown.test.mjs`): formattazione `MM:SS`/`HH:MM:SS`, `msUntil`, `isExpired` (incluso persistente = mai scaduto).
-  - download (`download.test.mjs`): `safeFilename` (caratteri proibiti, controllo, truncate 80, fallback), `buildFilename` (slug/kind/index, sanitize, defaults).
+La goroutine `runCleanup` esegue a ogni tick (`CLEANUP_INTERVAL`):
+
+1. **Sessioni scadute** — `DELETE FROM sessions WHERE expires_at <= now()`. I file collegati vengono cascade-deleted via FK.
+2. **`DeleteOrphanFiles(grace)`**:
+   - **Safety net**: rimuove righe `files` con `session_slug` non più presente in `sessions` (eseguito anche se FK fossero disabilitate, per resilienza in caso di DB incoerente).
+   - **Per-sessione**: per ciascuna sessione attiva, estrae gli ID dei marker dal `content` (regex `\[file:(ID):`), elimina i file di quella sessione il cui `id` non compare *e* il cui `created_at <= now() - FILE_GRACE`.
+
+`FILE_GRACE` (default 60s) protegge gli upload appena fatti il cui marker non è ancora stato propagato via WS/PUT, evitando di cancellare un file che sta per essere referenziato.
+
+Garanzie complessive:
+
+- Sessione persistente eliminata via admin → file cascade-deleted.
+- Sessione temporanea scaduta → sweep DELETE + cascade.
+- Marker rimosso dal testo (utente cancella la riga) → dopo `FILE_GRACE` dal momento dell'upload, prossimo tick elimina il file.
+- Upload appena fatto con marker non ancora committed → protetto da grace.
+
+---
 
 ## Versioning
 
-La versione è esposta da `internal/version.Version` (default `v1.0.0`). È visibile accanto al nome dell'app in tutte le pagine (`index`, `session`, `admin`) e nei log di boot.
+`internal/version.Version` (default `v1.0.0`) è esposta accanto al nome dell'app in tutte le pagine (`index`, `session`, `admin`) e nei log di boot.
 
 Override al build:
 
 ```bash
-# locale
+# locale via just
 VERSION=v1.2.3 just build
 
 # go nudo
@@ -309,7 +432,7 @@ VERSION=v1.2.3 docker compose build
 
 ### GitHub Actions
 
-Esempio di workflow che esegue una release Docker e inietta il tag come versione:
+Workflow di release Docker che inietta il tag come versione:
 
 ```yaml
 name: release
@@ -338,31 +461,112 @@ jobs:
             ghcr.io/${{ github.repository }}:latest
 ```
 
-Per build non-Docker da Action (ad es. release binary):
+Build non-Docker (release binary):
 
 ```yaml
 - run: go build -ldflags "-s -w -X sharetext/internal/version.Version=${{ github.ref_name }}" -o sharetext ./cmd/server
 ```
 
+---
+
+## Test
+
+```bash
+just test-all       # Go + JS
+just test           # solo Go
+just test-race      # Go con -race
+just test-js        # solo JS (node:test)
+```
+
+### Go
+
+- `internal/session`:
+  - `NewSlug` (length, alfabeto, unicità su 1000 iterazioni);
+  - `ValidName` (regex, edge case lunghezza, accenti, caratteri proibiti);
+  - `Compose` (anonymous, named, validazione).
+- `internal/store`:
+  - CRUD `sessions`: create + get + update + duplicati + concorrenza + Exists + Delete;
+  - scadenza: `Get`/`Update`/`Exists` restituiscono `ErrExpired`; `DeleteExpired` (mix persistent/temporary/future/past);
+  - `ListActive` (esclusione scadute, ordering, aggregazione `files_size`/`files_count`);
+  - `files`: AddFile (missing/expired session), GetFile, ListFiles, DeleteFile;
+  - cascade FK su session delete e DeleteExpired;
+  - `ReferencedFileIDs` (regex marker, edge case);
+  - `DeleteOrphanFiles`: unreferenced + grace protection + safety-net fallback con FK off.
+- `internal/handlers`:
+  - API sessioni (httptest): persistent/temporary validi e invalidi (400), 410 su scaduta su GET e PUT;
+  - hub broadcast / except / leave;
+  - WebSocket end-to-end con 2 client + slug inesistente;
+  - admin: missing/wrong creds (401), creds vuote (503), list (200 con esclusione scaduti, total_size con files), delete (200 + 404 idempotenza), delete unauthorized;
+  - file: upload happy/missing/unknown/oversize (413), download (binary + Content-Disposition), list, bundle ZIP (verificato letto via `archive/zip`, dedup nomi duplicati).
+
+### JS (`node:test`)
+
+- `blocks.test.mjs`: parser blocchi (input vuoto, blocchi singoli/multipli/spaiati/vuoti, whitespace, righe contenenti `-----`).
+- `countdown.test.mjs`: formattazione `MM:SS`/`HH:MM:SS`, `msUntil`, `isExpired` (persistente = mai scaduto).
+- `download.test.mjs`: `safeFilename` (caratteri proibiti, controllo, truncate 80, fallback), `buildFilename` (slug/kind/index, sanitize, defaults).
+- `files.test.mjs`: `parseFileMarker` (valid, encoded, whitespace, inline rejection, malformed, non-string), `buildFileMarker` (roundtrip, fallback), `formatBytes`.
+
+---
+
 ## Docker
 
 ```bash
-just up        # build + run via compose
-just smoke     # smoke test endpoints
-just down
+# Via compose (consigliato)
+just up        # build + start + volume named
+just smoke     # curl di healthz, create, put, get
+just down      # stop + drop container
 
-# senza compose
+# Senza compose
 docker build -t sharetext .
 docker run --rm -p 8080:8080 -v $(pwd)/data:/data sharetext
 ```
 
+L'image è basata su `gcr.io/distroless/static:nonroot`. Volume `/data` preallocato con owner `nonroot:nonroot` (UID 65532) nello stage build, quindi al primo mount di un volume vuoto Docker eredita correttamente le perms (no permission denied su SQLite open).
+
+Build args:
+
+- `VERSION` — override `internal/version.Version`.
+
+Env (vedi tabella sopra) sono passabili via `-e` o `compose.yaml`.
+
+---
+
 ## Struttura
 
 ```
-cmd/server/        main, cleanup goroutine, embed di template e asset statici
-  templates/       HTML server-rendered (index, session)
-  static/          JS modules (app, blocks, countdown), CSS
-internal/session/  generatore slug + validazione nome
-internal/store/    SQLite store (CRUD, scadenza, cleanup)
-internal/handlers/ API REST, hub WebSocket
+cmd/server/
+  main.go                  bootstrap, env parsing, route mount, cleanup goroutine
+  templates/
+    index.html             landing (form a due modalità)
+    session.html           pagina sessione (editor + righe + toolbar)
+    admin.html             pannello admin
+  static/
+    style.css              CSS unico (desktop + mobile + admin)
+    app.js                 client sessione: WS, debounce, render, drag-drop, toggle mobile
+    blocks.js              parser blocchi (`-----`)
+    countdown.js           helpers countdown (formattazione, msUntil, isExpired)
+    download.js            helpers download client-side (sanitize filename, blob trigger)
+    files.js               parser marker file, builder marker, formatBytes
+    admin.js               client admin: list, delete, mobile cards
+    blocks.test.mjs        node:test
+    countdown.test.mjs     node:test
+    download.test.mjs      node:test
+    files.test.mjs         node:test
+internal/
+  session/                 slug crypto-random + validazione nome
+  store/
+    store.go               sessions CRUD + scadenza + DeleteExpired + ListActive
+    files.go               files CRUD + ReferencedFileIDs + DeleteOrphanFiles
+  handlers/
+    api.go                 CRUD sessioni HTTP
+    ws.go                  WebSocket handler
+    hub.go                 pub/sub in-memory per stanza
+    admin.go               basic auth + list + delete
+    files.go               upload + download + list + bundle ZIP
+  version/
+    version.go             Version var (ldflags-overridable)
+Dockerfile                 multi-stage, distroless, ARG VERSION
+compose.yaml               servizio con volume + build-arg
+Justfile                   ricette (run, build, test*, up, down, smoke)
+README.md                  questo file
 ```
