@@ -111,6 +111,7 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 | `DB_PATH`           | `sharetext.db` | File SQLite                                                                |
 | `SLUG_LEN`          | `16`           | Lunghezza della parte random dello slug                                    |
 | `CLEANUP_INTERVAL`  | `30s`          | Frequenza sweep cancellazione sessioni scadute + allegati orfani           |
+| `VACUUM_INTERVAL`   | `0s` (off)     | Frequenza `VACUUM` SQLite + `wal_checkpoint(TRUNCATE)` per reclaim spazio. `0` o vuoto = disabilitato. |
 | `FILE_GRACE`        | `60s`          | Finestra di grazia per upload appena fatti (evita race su marker)          |
 | `MAX_FILE_SIZE`     | `10485760`     | Limite massimo upload (byte). Default 10 MiB.                              |
 | `ADMIN_USER`        | _(unset)_      | Username Basic Auth per `/admin`. Se vuoto, admin disabilitato (503).      |
@@ -389,6 +390,38 @@ Note di sicurezza:
   - allo zero appare un overlay "Sessione scaduta", editor disabilitato, WebSocket chiuso.
 
 ---
+
+## Vacuum DB (reclaim spazio)
+
+SQLite in modalità WAL non rilascia automaticamente lo spazio su filesystem dopo le `DELETE` (sessioni scadute, allegati orfani, delete da admin): le pagine restano "free" dentro il file `.db` e il file `.db-wal` cresce con le modifiche. Per ridurre realmente l'occupazione su disco serve `VACUUM` + `PRAGMA wal_checkpoint(TRUNCATE)`.
+
+L'app espone una goroutine periodica controllata dalla variabile `VACUUM_INTERVAL`:
+
+- `0s` (default) o variabile non settata → job **disabilitato**, comportamento legacy invariato.
+- Valore > 0 (es. `1h`, `24h`) → ogni tick esegue, in ordine:
+  1. `PRAGMA wal_checkpoint(TRUNCATE)` — flush e troncamento del WAL pre-vacuum.
+  2. `VACUUM` — riscrive il file principale rimuovendo le pagine libere.
+  3. `PRAGMA wal_checkpoint(TRUNCATE)` — tronca il WAL prodotto dal VACUUM stesso.
+
+Log per esecuzione (a info level):
+
+```
+vacuum: ok in 142ms (db=41943040B→1245184B, wal=40894464B→0B)
+```
+
+Avvertenze:
+
+- `VACUUM` riscrive l'intero DB e tiene un lock di scrittura per la durata: i `PUT /api/sessions/{slug}` vengono bloccati finché finisce. Su DB piccoli (≤100 MiB) è sub-secondo; su DB più grandi pianifica l'intervallo di conseguenza.
+- `VACUUM` richiede spazio temporaneo pari (in worst case) alla dimensione del DB.
+- Il job non gira al boot: il primo run avviene dopo `VACUUM_INTERVAL` per evitare di ritardare l'apertura del listener.
+- Errori del `wal_checkpoint` (es. WAL busy) sono **non fatali** e silenziosi; solo l'errore di `VACUUM` viene loggato.
+
+Esempio compose:
+
+```yaml
+environment:
+  VACUUM_INTERVAL: "24h"
+```
 
 ## Pulizia DB
 

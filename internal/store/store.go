@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -36,7 +37,8 @@ type CreateOpts struct {
 }
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 func Open(path string) (*Store, error) {
@@ -48,7 +50,7 @@ func Open(path string) (*Store, error) {
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
@@ -265,6 +267,69 @@ func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// VacuumStats reports filesystem sizes (in bytes) of the SQLite main file and
+// its WAL sidecar before/after a Vacuum run. Sizes are -1 when stat fails
+// (e.g. WAL absent on a brand-new DB), but those don't fail the operation.
+type VacuumStats struct {
+	DBPath        string
+	DBSizeBefore  int64
+	DBSizeAfter   int64
+	WALSizeBefore int64
+	WALSizeAfter  int64
+	Duration      time.Duration
+}
+
+// Vacuum runs VACUUM to reclaim free pages on disk, then truncates the WAL
+// with a checkpoint(TRUNCATE). Order matters in WAL journal mode: VACUUM
+// writes through the WAL, so the checkpoint comes *after* to leave the
+// sidecar empty. A pre-checkpoint also runs so VACUUM starts from a clean
+// state and the operation is idempotent under repeated runs.
+//
+// All statements run on a single dedicated connection because VACUUM cannot
+// execute inside an explicit transaction. Returns stats for logging.
+//
+// NOTE: VACUUM rewrites the entire database; while it runs writers are
+// blocked. Readers using WAL snapshots remain unaffected until the final
+// commit. On a 40MB DB this is sub-second; size accordingly when scheduling.
+func (s *Store) Vacuum(ctx context.Context) (VacuumStats, error) {
+	stats := VacuumStats{DBPath: s.path}
+	stats.DBSizeBefore, stats.WALSizeBefore = s.fileSizes()
+
+	start := time.Now()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return stats, fmt.Errorf("acquire conn: %w", err)
+	}
+	defer conn.Close()
+
+	// Pre-checkpoint: flush any pending WAL into the main file. Failure here
+	// (e.g. busy with other readers) is non-fatal; VACUUM still works.
+	_, _ = conn.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	if _, err := conn.ExecContext(ctx, `VACUUM`); err != nil {
+		return stats, fmt.Errorf("vacuum: %w", err)
+	}
+	// Post-checkpoint: truncate the WAL pages produced by VACUUM itself.
+	_, _ = conn.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+
+	stats.Duration = time.Since(start)
+	stats.DBSizeAfter, stats.WALSizeAfter = s.fileSizes()
+	return stats, nil
+}
+
+func (s *Store) fileSizes() (db int64, wal int64) {
+	db, wal = -1, -1
+	if s.path == "" {
+		return
+	}
+	if fi, err := os.Stat(s.path); err == nil {
+		db = fi.Size()
+	}
+	if fi, err := os.Stat(s.path + "-wal"); err == nil {
+		wal = fi.Size()
+	}
+	return
 }
 
 // Delete removes a single session by slug.

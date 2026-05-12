@@ -41,6 +41,11 @@ func main() {
 	if fileGrace <= 0 {
 		fileGrace = 60 * time.Second
 	}
+	// VACUUM_INTERVAL: 0 (or unset/invalid) disables the periodic vacuum job.
+	vacuumInterval, _ := time.ParseDuration(envOr("VACUUM_INTERVAL", "0s"))
+	if vacuumInterval < 0 {
+		vacuumInterval = 0
+	}
 	adminUser := os.Getenv("ADMIN_USER")
 	adminPass := os.Getenv("ADMIN_PASS")
 	if v := os.Getenv("MAX_FILE_SIZE"); v != "" {
@@ -136,13 +141,20 @@ func main() {
 	defer stop()
 
 	go runCleanup(ctx, st, cleanupInterval, fileGrace)
+	if vacuumInterval > 0 {
+		go runVacuum(ctx, st, vacuumInterval)
+	}
 
 	go func() {
 		adminMode := "disabled"
 		if adminUser != "" && adminPass != "" {
 			adminMode = "enabled (user=" + adminUser + ")"
 		}
-		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, file_grace=%s, admin=%s, max_file=%dB)", version.Version, port, dbPath, cleanupInterval, fileGrace, adminMode, handlers.MaxFileSize)
+		vacuumMode := "disabled"
+		if vacuumInterval > 0 {
+			vacuumMode = vacuumInterval.String()
+		}
+		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, file_grace=%s, vacuum=%s, admin=%s, max_file=%dB)", version.Version, port, dbPath, cleanupInterval, fileGrace, vacuumMode, adminMode, handlers.MaxFileSize)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}
@@ -181,6 +193,33 @@ func runCleanup(ctx context.Context, st *store.Store, every, fileGrace time.Dura
 			return
 		case <-tick.C:
 			doSweep()
+		}
+	}
+}
+
+func runVacuum(ctx context.Context, st *store.Store, every time.Duration) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	doVacuum := func() {
+		// Long generous timeout: VACUUM may rewrite a large file on slow disks.
+		vctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		stats, err := st.Vacuum(vctx)
+		if err != nil {
+			log.Printf("vacuum: %v", err)
+			return
+		}
+		log.Printf("vacuum: ok in %s (db=%dB→%dB, wal=%dB→%dB)",
+			stats.Duration.Round(time.Millisecond),
+			stats.DBSizeBefore, stats.DBSizeAfter,
+			stats.WALSizeBefore, stats.WALSizeAfter)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			doVacuum()
 		}
 	}
 }

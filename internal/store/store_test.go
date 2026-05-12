@@ -292,6 +292,56 @@ func TestListActiveOrdering(t *testing.T) {
 	}
 }
 
+func TestVacuum(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, CreateOpts{Slug: "vac"}); err != nil {
+		t.Fatal(err)
+	}
+	// Inflate the DB with a few large blobs, then delete them so VACUUM has
+	// free pages to reclaim.
+	blob := make([]byte, 512*1024)
+	for i := 0; i < 8; i++ {
+		fid := "f" + string(rune('a'+i))
+		if _, err := s.AddFile(ctx, "vac", fid, fid+".bin", "application/octet-stream", blob); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM files WHERE session_slug = ?`, "vac"); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := s.Vacuum(ctx)
+	if err != nil {
+		t.Fatalf("vacuum: %v", err)
+	}
+	if stats.DBSizeAfter <= 0 || stats.DBSizeBefore <= 0 {
+		t.Fatalf("expected positive sizes, got %+v", stats)
+	}
+	if stats.DBSizeAfter > stats.DBSizeBefore {
+		t.Fatalf("expected DB to shrink or stay equal, got before=%d after=%d", stats.DBSizeBefore, stats.DBSizeAfter)
+	}
+	// WAL should be truncated to (near) zero by the checkpoint(TRUNCATE) pass.
+	if stats.WALSizeAfter > 0 {
+		t.Fatalf("expected WAL truncated, got %d", stats.WALSizeAfter)
+	}
+
+	// Sanity: DB still usable after VACUUM.
+	if _, err := s.Get(ctx, "vac"); err != nil {
+		t.Fatalf("session unusable after vacuum: %v", err)
+	}
+	if _, err := s.Create(ctx, CreateOpts{Slug: "post-vacuum"}); err != nil {
+		t.Fatalf("create after vacuum: %v", err)
+	}
+}
+
+func TestVacuumEmptyDB(t *testing.T) {
+	s := openTest(t)
+	if _, err := s.Vacuum(context.Background()); err != nil {
+		t.Fatalf("vacuum on empty db: %v", err)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
