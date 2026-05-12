@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
+  <title>sharetext · admin</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="bar">
+    <a href="/" class="brand">sharetext</a>
+    <div class="meta">
+      <span class="badge admin">admin</span>
+      <button id="refresh">Aggiorna</button>
+    </div>
+  </header>
+  <main class="admin">
+    <div class="admin-summary">
+      <h1>Sessioni attive</h1>
+      <p id="count" class="muted">Caricamento...</p>
+    </div>
+    <p id="error" class="error" hidden></p>
+    <div class="admin-table-wrap">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>Slug</th>
+            <th>Nome</th>
+            <th>Tipo</th>
+            <th>Size</th>
+            <th>Creata</th>
+            <th>Aggiornata</th>
+            <th>Scade</th>
+            <th class="col-actions">Azioni</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="8" class="muted center">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+  <script src="/static/admin.js"></script>
+</body>
+</html>

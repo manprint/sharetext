@@ -2,7 +2,8 @@
 <html lang="it">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
   <title>sharetext · {{.Slug}}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -12,11 +13,12 @@
     <div class="meta">
       <span id="countdown" class="countdown" hidden></span>
       <span class="status" id="status">offline</span>
+      <button id="toggle-view" class="mobile-only" type="button" aria-pressed="false">Modifica</button>
       <button id="copy-link">Copia link</button>
       <button id="copy-all" class="primary">Copia tutto</button>
     </div>
   </header>
-  <main class="session">
+  <main id="session" class="session">
     <div class="pane edit">
       <label for="content" class="label">Editor</label>
       <textarea id="content" spellcheck="false" placeholder="Incolla qui il testo da condividere..."></textarea>

@@ -9,6 +9,25 @@ const $copyAll = document.getElementById('copy-all');
 const $copyLink = document.getElementById('copy-link');
 const $countdown = document.getElementById('countdown');
 const $overlay = document.getElementById('expired-overlay');
+const $session = document.getElementById('session');
+const $toggleView = document.getElementById('toggle-view');
+
+function setEditing(on) {
+  if (!$session || !$toggleView) return;
+  $session.classList.toggle('editing', on);
+  $toggleView.textContent = on ? 'Righe' : 'Modifica';
+  $toggleView.setAttribute('aria-pressed', String(on));
+  if (on) {
+    requestAnimationFrame(() => { try { $content.focus({ preventScroll: true }); } catch {} });
+  }
+}
+
+if ($toggleView) {
+  $toggleView.addEventListener('click', () => {
+    const isEditing = $session.classList.contains('editing');
+    setEditing(!isEditing);
+  });
+}
 
 let ws = null;
 let suppressSend = false;

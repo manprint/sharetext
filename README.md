@@ -26,12 +26,14 @@ Apri http://localhost:8080. Scegli **Persistente** + nome, oppure **Temporanea**
 
 ### Variabili d'ambiente
 
-| Variabile           | Default        | Descrizione                                           |
-|---------------------|----------------|-------------------------------------------------------|
-| `PORT`              | `8080`         | Porta HTTP                                            |
-| `DB_PATH`           | `sharetext.db` | File SQLite                                           |
-| `SLUG_LEN`          | `16`           | Lunghezza della parte random dello slug               |
-| `CLEANUP_INTERVAL`  | `30s`          | Frequenza sweep cancellazione sessioni scadute        |
+| Variabile           | Default        | Descrizione                                                                |
+|---------------------|----------------|----------------------------------------------------------------------------|
+| `PORT`              | `8080`         | Porta HTTP                                                                 |
+| `DB_PATH`           | `sharetext.db` | File SQLite                                                                |
+| `SLUG_LEN`          | `16`           | Lunghezza della parte random dello slug                                    |
+| `CLEANUP_INTERVAL`  | `30s`          | Frequenza sweep cancellazione sessioni scadute                             |
+| `ADMIN_USER`        | _(unset)_      | Username Basic Auth per `/admin`. Se vuoto, admin disabilitato (503).      |
+| `ADMIN_PASS`        | _(unset)_      | Password Basic Auth per `/admin`. Se vuota, admin disabilitato (503).      |
 
 ## API
 
@@ -135,6 +137,66 @@ Regole:
 - Due `-----` consecutivi formano un blocco vuoto.
 - Una riga che *contiene* `-----` ma non è composta solo da `-----` (con eventuali spazi) NON è un delimitatore.
 - Il pulsante **Copia tutto** copia il contenuto raw dell'editor, delimitatori compresi (preserva round-trip).
+
+## Admin
+
+Pannello di amministrazione su `/admin`, protetto da HTTP Basic Auth. Mostra tutte le sessioni non scadute (persistenti + temporanee ancora attive) con metadata: slug, nome, tipo, dimensione contenuto, timestamp di creazione/aggiornamento, scadenza. Pulsante **Elimina** rimuove la sessione in modo definitivo (hard delete, irreversibile).
+
+### Abilitazione
+
+Setta entrambe le variabili `ADMIN_USER` e `ADMIN_PASS`. Se una è vuota, qualsiasi richiesta sotto `/admin` risponde con `503 Service Unavailable` (admin disabilitato).
+
+```bash
+ADMIN_USER=admin ADMIN_PASS=secret just run
+# oppure via compose: si configurano in compose.yaml (override .env)
+```
+
+### Endpoints
+
+| Metodo  | Path                              | Effetto                                  |
+|---------|-----------------------------------|------------------------------------------|
+| GET     | `/admin`                          | HTML del pannello                        |
+| GET     | `/admin/api/sessions`             | JSON elenco sessioni attive              |
+| DELETE  | `/admin/api/sessions/{slug}`      | Elimina sessione (hard delete)           |
+
+Esempio JSON `/admin/api/sessions`:
+
+```jsonc
+{
+  "count": 2,
+  "sessions": [
+    {
+      "slug": "team-alpha-3vRdM58dftguriSe",
+      "name": "team-alpha",
+      "type": "persistent",
+      "content_size": 421,
+      "created_at": "2026-05-12T14:00:00Z",
+      "updated_at": "2026-05-12T14:05:32Z"
+    },
+    {
+      "slug": "p3zXjUUcvc9SPRdX",
+      "type": "temporary",
+      "content_size": 0,
+      "created_at": "2026-05-12T14:09:21Z",
+      "updated_at": "2026-05-12T14:09:21Z",
+      "expires_at": "2026-05-12T14:39:21Z"
+    }
+  ]
+}
+```
+
+Esempio curl:
+
+```bash
+curl -u admin:secret http://localhost:8080/admin/api/sessions
+curl -u admin:secret -X DELETE http://localhost:8080/admin/api/sessions/team-alpha-XYZ
+```
+
+Note di sicurezza:
+
+- Le credenziali vengono confrontate in tempo costante (`crypto/subtle`).
+- Basic Auth viaggia in chiaro: dietro reverse proxy usare sempre HTTPS.
+- Le sessioni scadute non compaiono in lista (filtrate via SQL `expires_at IS NULL OR expires_at > now`).
 
 ## Sessioni temporanee — comportamento di scadenza
 

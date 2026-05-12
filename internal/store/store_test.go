@@ -230,6 +230,68 @@ func TestDeleteExpired(t *testing.T) {
 	}
 }
 
+func TestListActive(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	past := time.Now().Add(-time.Hour).UTC()
+	future := time.Now().Add(time.Hour).UTC()
+
+	if _, err := s.Create(ctx, CreateOpts{Slug: "persist1", Name: "team"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Update(ctx, "persist1", "hello world"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create(ctx, CreateOpts{Slug: "tmp-live", ExpiresAt: &future}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create(ctx, CreateOpts{Slug: "tmp-dead", ExpiresAt: &past}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := s.ListActive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("want 2 active, got %d: %+v", len(list), list)
+	}
+	slugs := map[string]SessionSummary{}
+	for _, it := range list {
+		slugs[it.Slug] = it
+	}
+	if _, ok := slugs["tmp-dead"]; ok {
+		t.Fatal("expired session should not appear in ListActive")
+	}
+	if s := slugs["persist1"]; s.Name != "team" || s.ContentSize != len("hello world") || s.ExpiresAt != nil {
+		t.Fatalf("persistent summary wrong: %+v", s)
+	}
+	if s := slugs["tmp-live"]; s.ExpiresAt == nil {
+		t.Fatalf("temporary summary should have expires_at: %+v", s)
+	}
+}
+
+func TestListActiveOrdering(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	for _, sl := range []string{"first", "second", "third"} {
+		if _, err := s.Create(ctx, CreateOpts{Slug: sl}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(1100 * time.Millisecond) // ensure distinct unix-second created_at
+	}
+	list, err := s.ListActive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("want 3, got %d", len(list))
+	}
+	if list[0].Slug != "third" || list[2].Slug != "first" {
+		t.Fatalf("expected newest first: %+v", list)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()

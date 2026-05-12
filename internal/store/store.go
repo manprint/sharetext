@@ -184,6 +184,53 @@ func (s *Store) Exists(ctx context.Context, slug string) (bool, error) {
 	return false, err
 }
 
+type SessionSummary struct {
+	Slug        string
+	Name        string
+	ContentSize int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	ExpiresAt   *time.Time
+}
+
+// ListActive returns all non-expired sessions ordered by created_at desc.
+func (s *Store) ListActive(ctx context.Context) ([]SessionSummary, error) {
+	now := time.Now().UTC().Unix()
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT slug, name, length(content), created_at, updated_at, expires_at
+		   FROM sessions
+		  WHERE expires_at IS NULL OR expires_at > ?
+		  ORDER BY created_at DESC`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionSummary
+	for rows.Next() {
+		var (
+			it      SessionSummary
+			name    sql.NullString
+			created int64
+			updated int64
+			exp     sql.NullInt64
+		)
+		if err := rows.Scan(&it.Slug, &name, &it.ContentSize, &created, &updated, &exp); err != nil {
+			return nil, err
+		}
+		if name.Valid {
+			it.Name = name.String
+		}
+		it.CreatedAt = time.Unix(created, 0).UTC()
+		it.UpdatedAt = time.Unix(updated, 0).UTC()
+		if exp.Valid {
+			t := time.Unix(exp.Int64, 0).UTC()
+			it.ExpiresAt = &t
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
 // DeleteExpired removes all sessions with expires_at <= now. Returns number deleted.
 func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx,

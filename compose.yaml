@@ -9,6 +9,9 @@ services:
       PORT: "8080"
       DB_PATH: /data/sharetext.db
       SLUG_LEN: "16"
+      CLEANUP_INTERVAL: "30s"
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+      ADMIN_PASS: "${ADMIN_PASS:-changeme}"
     volumes:
       - sharetext-data:/data
     restart: unless-stopped

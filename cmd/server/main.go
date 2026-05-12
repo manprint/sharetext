@@ -36,6 +36,8 @@ func main() {
 	if cleanupInterval <= 0 {
 		cleanupInterval = 30 * time.Second
 	}
+	adminUser := os.Getenv("ADMIN_USER")
+	adminPass := os.Getenv("ADMIN_PASS")
 
 	st, err := store.Open(dbPath)
 	if err != nil {
@@ -93,6 +95,18 @@ func main() {
 	r.Put("/api/sessions/{slug}", api.UpdateSession)
 	r.Get("/ws/{slug}", api.WS)
 
+	adminAuth := handlers.BasicAuth(adminUser, adminPass, "sharetext-admin")
+	r.Group(func(g chi.Router) {
+		g.Use(adminAuth)
+		g.Get("/admin", func(w http.ResponseWriter, _ *http.Request) {
+			if err := tpl.ExecuteTemplate(w, "admin.html", nil); err != nil {
+				log.Printf("render admin: %v", err)
+			}
+		})
+		g.Get("/admin/api/sessions", api.AdminList)
+		g.Delete("/admin/api/sessions/{slug}", api.AdminDelete)
+	})
+
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           r,
@@ -105,7 +119,11 @@ func main() {
 	go runCleanup(ctx, st, cleanupInterval)
 
 	go func() {
-		log.Printf("sharetext listening on :%s (db=%s, cleanup=%s)", port, dbPath, cleanupInterval)
+		adminMode := "disabled"
+		if adminUser != "" && adminPass != "" {
+			adminMode = "enabled (user=" + adminUser + ")"
+		}
+		log.Printf("sharetext listening on :%s (db=%s, cleanup=%s, admin=%s)", port, dbPath, cleanupInterval, adminMode)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}
