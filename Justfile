@@ -30,7 +30,7 @@ test-race:
 
 # Run JS tests (block parser + countdown + download helpers)
 test-js:
-    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs
+    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs
 
 # Run all tests
 test-all: test test-js

@@ -62,7 +62,6 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(cfg.RequestTimeout))
 	r.Use(handlers.SecurityHeaders(handlers.SecurityHeadersConfig{
 		Enabled:                 cfg.SecurityHeadersEnabled,
 		ContentSecurityPolicy:   cfg.ContentSecurityPolicy,
@@ -84,18 +83,19 @@ func main() {
 		Burst:             cfg.AdminRateLimitBurst,
 		EntryTTL:          cfg.AdminRateLimitTTL,
 	})
+	requestTimeout := middleware.Timeout(cfg.RequestTimeout)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
 	r.Group(func(g chi.Router) {
 		g.Use(publicRateLimit)
-		g.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		g.With(requestTimeout).Get("/", func(w http.ResponseWriter, r *http.Request) {
 			if err := tpl.ExecuteTemplate(w, "index.html", nil); err != nil {
 				log.Printf("render index: %v", err)
 			}
 		})
-		g.Get("/s/{slug}", func(w http.ResponseWriter, r *http.Request) {
+		g.With(requestTimeout).Get("/s/{slug}", func(w http.ResponseWriter, r *http.Request) {
 			slug := chi.URLParam(r, "slug")
 			ok, err := st.Exists(r.Context(), slug)
 			if err != nil {
@@ -110,20 +110,24 @@ func main() {
 				log.Printf("render session: %v", err)
 			}
 		})
-		g.Post("/api/sessions", api.CreateSession)
-		g.Get("/api/sessions/{slug}", api.GetSession)
-		g.Put("/api/sessions/{slug}", api.UpdateSession)
+		g.Group(func(apiRoutes chi.Router) {
+			apiRoutes.Use(requestTimeout)
+			apiRoutes.Post("/api/sessions", api.CreateSession)
+			apiRoutes.Get("/api/sessions/{slug}", api.GetSession)
+			apiRoutes.Put("/api/sessions/{slug}", api.UpdateSession)
+			apiRoutes.Post("/api/sessions/{slug}/files", api.UploadFile)
+			apiRoutes.Get("/api/sessions/{slug}/files", api.ListFiles)
+			apiRoutes.Get("/api/sessions/{slug}/files/{id}", api.DownloadFile)
+			apiRoutes.Get("/api/sessions/{slug}/bundle", api.Bundle)
+		})
 		g.Get("/ws/{slug}", api.WS)
-		g.Post("/api/sessions/{slug}/files", api.UploadFile)
-		g.Get("/api/sessions/{slug}/files", api.ListFiles)
-		g.Get("/api/sessions/{slug}/files/{id}", api.DownloadFile)
-		g.Get("/api/sessions/{slug}/bundle", api.Bundle)
 	})
 
 	adminAuth := handlers.BasicAuth(cfg.AdminUser, cfg.AdminPass, "sharetext-admin")
 	r.Group(func(g chi.Router) {
 		g.Use(adminRateLimit)
 		g.Use(adminAuth)
+		g.Use(requestTimeout)
 		g.Get("/admin", func(w http.ResponseWriter, _ *http.Request) {
 			if err := tpl.ExecuteTemplate(w, "admin.html", nil); err != nil {
 				log.Printf("render admin: %v", err)

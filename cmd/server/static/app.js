@@ -2,6 +2,7 @@ import { parseBlocks } from './blocks.js';
 import { formatRemaining, msUntil, isExpired } from './countdown.js';
 import { buildFilename, downloadText } from './download.js';
 import { parseFileMarker, buildFileMarker, formatBytes } from './files.js';
+import { shouldApplyRemoteContent, shouldFlushPendingLocalChanges } from './sync.js';
 
 const slug = window.__SLUG__;
 const $content = document.getElementById('content');
@@ -40,6 +41,8 @@ let ws = null;
 let suppressSend = false;
 let debounceTimer = null;
 let lastSent = '';
+let hasPendingLocalChanges = false;
+let awaitingInitialSnapshot = false;
 let expiresAt = null;
 let countdownTimer = null;
 let expiredHandled = false;
@@ -173,8 +176,15 @@ function renderFileRow(li, num, fm) {
   $lines.appendChild(li);
 }
 
-function applyRemote(content) {
-  if ($content.value === content) return;
+function applyRemote(content, { initialSnapshot = false } = {}) {
+  if (!shouldApplyRemoteContent({
+    currentContent: $content.value,
+    incomingContent: content,
+    hasPendingLocalChanges,
+    initialSnapshot,
+  })) {
+    return false;
+  }
   const sel = [$content.selectionStart, $content.selectionEnd];
   suppressSend = true;
   $content.value = content;
@@ -182,13 +192,29 @@ function applyRemote(content) {
   suppressSend = false;
   renderItems(content);
   lastSent = content;
+  return true;
 }
 
 function send(content) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  if (content === lastSent) return;
-  ws.send(JSON.stringify({ content }));
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  if (content === lastSent) {
+    hasPendingLocalChanges = false;
+    return true;
+  }
+  try {
+    ws.send(JSON.stringify({ content }));
+  } catch {
+    return false;
+  }
   lastSent = content;
+  hasPendingLocalChanges = false;
+  return true;
+}
+
+function flushPendingLocalChanges() {
+  if (!hasPendingLocalChanges) return;
+  clearTimeout(debounceTimer);
+  send($content.value);
 }
 
 function handleExpired() {
@@ -231,8 +257,8 @@ function startCountdown(iso) {
   countdownTimer = setInterval(tick, 1000);
 }
 
-function applySessionPayload(s) {
-  if (typeof s.content === 'string') applyRemote(s.content);
+function applySessionPayload(s, { initialSnapshot = false } = {}) {
+  if (typeof s.content === 'string') applyRemote(s.content, { initialSnapshot });
   if (s.expires_at !== undefined) {
     if (s.expires_at) startCountdown(s.expires_at);
     else if ($countdown) $countdown.hidden = true;
@@ -243,8 +269,12 @@ function connect() {
   if (expiredHandled) return;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(slug)}`);
-  ws.addEventListener('open', () => setStatus(true));
+  ws.addEventListener('open', () => {
+    awaitingInitialSnapshot = true;
+    setStatus(true);
+  });
   ws.addEventListener('close', () => {
+    awaitingInitialSnapshot = false;
     setStatus(false);
     if (expiredHandled) return;
     // If the session expired in the meantime, GET will return 410 → overlay.
@@ -260,13 +290,19 @@ function connect() {
   ws.addEventListener('message', (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      applySessionPayload(msg);
+      const initialSnapshot = awaitingInitialSnapshot;
+      awaitingInitialSnapshot = false;
+      applySessionPayload(msg, { initialSnapshot });
+      if (shouldFlushPendingLocalChanges({ initialSnapshot, hasPendingLocalChanges })) {
+        flushPendingLocalChanges();
+      }
     } catch {}
   });
 }
 
 $content.addEventListener('input', () => {
   if (suppressSend || expiredHandled) return;
+  hasPendingLocalChanges = true;
   renderItems($content.value);
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => send($content.value), 250);
@@ -327,6 +363,7 @@ async function pushContent(text) {
   // Persist via PUT so the change survives even when the WebSocket is not yet
   // open (e.g. right after page load on mobile). The server-side hub then
   // broadcasts to all peers, including this client's WS.
+  hasPendingLocalChanges = true;
   lastSent = text;
   try {
     const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}`, {
@@ -335,6 +372,7 @@ async function pushContent(text) {
       body: JSON.stringify({ content: text }),
     });
     if (!res.ok) throw new Error(`PUT ${res.status}`);
+    hasPendingLocalChanges = false;
   } catch (e) {
     // Fallback: try WS path (no-op if WS not open yet).
     send(text);
@@ -439,7 +477,7 @@ fetch(`/api/sessions/${encodeURIComponent(slug)}`)
     }
     return r.ok ? r.json() : Promise.reject(new Error('load failed'));
   })
-  .then((s) => { if (s) applySessionPayload(s); })
+  .then((s) => { if (s) applySessionPayload(s, { initialSnapshot: true }); })
   .catch(() => {})
   .finally(() => {
     if (expiredHandled) return;
