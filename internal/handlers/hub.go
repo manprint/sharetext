@@ -47,3 +47,19 @@ func (h *Hub) Broadcast(slug string, msg []byte, except chan []byte) {
 		}
 	}
 }
+
+func (h *Hub) ActiveRooms() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.rooms)
+}
+
+func (h *Hub) ActiveConnections() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	total := 0
+	for _, room := range h.rooms {
+		total += len(room)
+	}
+	return total
+}

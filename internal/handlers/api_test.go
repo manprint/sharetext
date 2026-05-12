@@ -230,3 +230,17 @@ func TestUpdateExpiredReturns410(t *testing.T) {
 		t.Fatalf("want 410, got %d", w.Code)
 	}
 }
+
+func TestUpdateTooLargeReturns413(t *testing.T) {
+	api, r := newTestAPI(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "big"}); err != nil {
+		t.Fatal(err)
+	}
+	old := MaxContentSize
+	MaxContentSize = 5
+	t.Cleanup(func() { MaxContentSize = old })
+	w := doJSON(t, r, http.MethodPut, "/api/sessions/big", updateReq{Content: "123456"})
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("want 413, got %d body=%s", w.Code, w.Body.String())
+	}
+}

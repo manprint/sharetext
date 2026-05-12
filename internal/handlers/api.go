@@ -11,6 +11,7 @@ import (
 
 	"sharetext/internal/session"
 	"sharetext/internal/store"
+	"sharetext/internal/telemetry"
 )
 
 const (
@@ -18,10 +19,14 @@ const (
 	MaxSessionMinutes = 60 * 24 * 7 // 7 days
 )
 
+var MaxContentSize int64 = 4 * 1024 * 1024
+
 type API struct {
-	Store   *store.Store
-	Hub     *Hub
-	SlugLen int
+	Store                *store.Store
+	Hub                  *Hub
+	SlugLen              int
+	Metrics              *telemetry.Metrics
+	AuditLogDefaultLimit int
 }
 
 type createReq struct {
@@ -52,7 +57,7 @@ type updateReq struct {
 func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	var body createReq
 	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeJSONBody(w, r, &body, 64*1024); err != nil {
 			http.Error(w, "bad json", http.StatusBadRequest)
 			return
 		}
@@ -98,6 +103,9 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create failed", http.StatusInternalServerError)
 		return
 	}
+	if a.Metrics != nil {
+		a.Metrics.IncSessionsCreated()
+	}
 	writeJSON(w, http.StatusCreated, createResp{
 		Slug:      sess.Slug,
 		URL:       "/s/" + sess.Slug,
@@ -119,14 +127,25 @@ func (a *API) GetSession(w http.ResponseWriter, r *http.Request) {
 func (a *API) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	var body updateReq
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+	if err := decodeJSONBody(w, r, &body, MaxContentSize+1024); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	if MaxContentSize > 0 && int64(len(body.Content)) > MaxContentSize {
+		http.Error(w, "content too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	sess, err := a.Store.Update(r.Context(), slug, body.Content)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
+	}
+	if a.Metrics != nil {
+		a.Metrics.IncSessionUpdates()
 	}
 	if a.Hub != nil {
 		msg, _ := json.Marshal(toSessionResp(sess))
@@ -151,6 +170,8 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, store.ErrExpired):
 		http.Error(w, "session expired", http.StatusGone)
+	case errors.Is(err, store.ErrTooManyFiles), errors.Is(err, store.ErrSessionStorageExceeded):
+		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 	default:
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -160,4 +181,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+var errBodyTooLarge = errors.New("body too large")
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	if limit > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+	}
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return errBodyTooLarge
+		}
+		return err
+	}
+	return nil
 }

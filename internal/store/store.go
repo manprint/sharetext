@@ -13,8 +13,10 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("session not found")
-	ErrExpired  = errors.New("session expired")
+	ErrNotFound               = errors.New("session not found")
+	ErrExpired                = errors.New("session expired")
+	ErrTooManyFiles           = errors.New("too many files in session")
+	ErrSessionStorageExceeded = errors.New("session storage limit exceeded")
 )
 
 type Session struct {
@@ -23,6 +25,11 @@ type Session struct {
 	Content   string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	ExpiresAt *time.Time
+}
+
+type SessionState struct {
+	Slug      string
 	ExpiresAt *time.Time
 }
 
@@ -39,9 +46,18 @@ type CreateOpts struct {
 type Store struct {
 	db   *sql.DB
 	path string
+	opts Options
 }
 
 func Open(path string) (*Store, error) {
+	return OpenWithOptions(path, Options{})
+}
+
+func OpenWithOptions(path string, opts Options) (*Store, error) {
+	normalized, err := opts.normalized(path)
+	if err != nil {
+		return nil, err
+	}
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -50,7 +66,12 @@ func Open(path string) (*Store, error) {
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, path: path}
+	if normalized.FileBackend == FileBackendFS {
+		if err := os.MkdirAll(normalized.FileStorageDir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	s := &Store{db: db, path: path, opts: normalized}
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
@@ -101,8 +122,42 @@ CREATE TABLE IF NOT EXISTS files (
 );`); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_slug)`)
-	return err
+	if err := addColumn(`ALTER TABLE files ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'db'`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_slug)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_files_session_created ON files(session_slug, created_at)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS file_refs (
+    session_slug TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    PRIMARY KEY (session_slug, file_id),
+    FOREIGN KEY (session_slug) REFERENCES sessions(slug) ON DELETE CASCADE
+);`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_file_refs_session ON file_refs(session_slug)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC)`); err != nil {
+		return err
+	}
+	return s.backfillFileRefsIfNeeded()
 }
 
 func (s *Store) Create(ctx context.Context, opts CreateOpts) (*Session, error) {
@@ -168,31 +223,74 @@ func (s *Store) Get(ctx context.Context, slug string) (*Session, error) {
 }
 
 func (s *Store) Update(ctx context.Context, slug, content string) (*Session, error) {
-	cur, err := s.Get(ctx, slug)
-	if err != nil {
+	return retryOnBusy(func() (*Session, error) {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback()
+
+		stats, err := s.sessionStatsTx(ctx, tx, slug)
+		if err != nil {
+			return nil, err
+		}
+		if s.opts.MaxSessionStorageBytes > 0 && int64(len(content))+stats.FilesSize > s.opts.MaxSessionStorageBytes {
+			return nil, ErrSessionStorageExceeded
+		}
+		now := time.Now().UTC()
+		res, err := tx.ExecContext(ctx,
+			`UPDATE sessions SET content = ?, updated_at = ? WHERE slug = ?`,
+			content, now.Unix(), slug)
+		if err != nil {
+			return nil, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return nil, ErrNotFound
+		}
+		if err := s.syncSessionRefsTx(ctx, tx, slug, content); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return &Session{
+			Slug:      slug,
+			Name:      stats.Name,
+			Content:   content,
+			CreatedAt: stats.CreatedAt,
+			UpdatedAt: now,
+			ExpiresAt: stats.ExpiresAt,
+		}, nil
+	})
+}
+
+func (s *Store) GetSessionState(ctx context.Context, slug string) (*SessionState, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT slug, expires_at FROM sessions WHERE slug = ?`, slug)
+	var state SessionState
+	var exp sql.NullInt64
+	if err := row.Scan(&state.Slug, &exp); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, err
 	}
-	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET content = ?, updated_at = ? WHERE slug = ?`,
-		content, now.Unix(), slug)
-	if err != nil {
-		return nil, err
+	if exp.Valid {
+		t := time.Unix(exp.Int64, 0).UTC()
+		state.ExpiresAt = &t
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
+	if state.ExpiresAt != nil && !time.Now().UTC().Before(*state.ExpiresAt) {
+		return nil, ErrExpired
 	}
-	if n == 0 {
-		return nil, ErrNotFound
-	}
-	cur.Content = content
-	cur.UpdatedAt = now
-	return cur, nil
+	return &state, nil
 }
 
 func (s *Store) Exists(ctx context.Context, slug string) (bool, error) {
-	_, err := s.Get(ctx, slug)
+	_, err := s.GetSessionState(ctx, slug)
 	if err == nil {
 		return true, nil
 	}
@@ -200,6 +298,72 @@ func (s *Store) Exists(ctx context.Context, slug string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+type sessionStats struct {
+	Slug        string
+	Name        string
+	ContentSize int64
+	FilesSize   int64
+	FilesCount  int
+	CreatedAt   time.Time
+	ExpiresAt   *time.Time
+}
+
+func getSessionStats(row interface {
+	Scan(...any) error
+}) (*sessionStats, error) {
+	var stats sessionStats
+	var name sql.NullString
+	var created int64
+	var exp sql.NullInt64
+	if err := row.Scan(&stats.Slug, &name, &created, &exp, &stats.ContentSize, &stats.FilesSize, &stats.FilesCount); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if name.Valid {
+		stats.Name = name.String
+	}
+	stats.CreatedAt = time.Unix(created, 0).UTC()
+	if exp.Valid {
+		t := time.Unix(exp.Int64, 0).UTC()
+		stats.ExpiresAt = &t
+	}
+	if stats.ExpiresAt != nil && !time.Now().UTC().Before(*stats.ExpiresAt) {
+		return nil, ErrExpired
+	}
+	return &stats, nil
+}
+
+func (s *Store) sessionStatsTx(ctx context.Context, tx *sql.Tx, slug string) (*sessionStats, error) {
+	row := tx.QueryRowContext(ctx, `SELECT slug, name, created_at, expires_at,
+		COALESCE(length(content), 0),
+		COALESCE((SELECT SUM(size) FROM files WHERE session_slug = ?), 0),
+		COALESCE((SELECT COUNT(*) FROM files WHERE session_slug = ?), 0)
+		FROM sessions WHERE slug = ?`, slug, slug, slug)
+	return getSessionStats(row)
+}
+
+func retryOnBusy[T any](fn func() (T, error)) (T, error) {
+	var zero T
+	for attempt := 0; attempt < 10; attempt++ {
+		value, err := fn()
+		if !isSQLiteBusy(err) || attempt == 9 {
+			return value, err
+		}
+		time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+	}
+	return zero, nil
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToUpper(err.Error())
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "DATABASE IS LOCKED")
 }
 
 type SessionSummary struct {
@@ -260,13 +424,24 @@ func (s *Store) ListActive(ctx context.Context) ([]SessionSummary, error) {
 
 // DeleteExpired removes all sessions with expires_at <= now. Returns number deleted.
 func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
+	fsSlugs, err := s.expiredFSSessionSlugs(ctx)
+	if err != nil {
+		return 0, err
+	}
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= ?`,
 		time.Now().UTC().Unix())
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	for _, slug := range fsSlugs {
+		_ = s.removeSessionDir(slug)
+	}
+	return n, nil
 }
 
 // VacuumStats reports filesystem sizes (in bytes) of the SQLite main file and
@@ -334,6 +509,10 @@ func (s *Store) fileSizes() (db int64, wal int64) {
 
 // Delete removes a single session by slug.
 func (s *Store) Delete(ctx context.Context, slug string) error {
+	hadFSFiles, err := s.sessionHasFSFiles(ctx, slug)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE slug = ?`, slug)
 	if err != nil {
 		return err
@@ -344,6 +523,9 @@ func (s *Store) Delete(ctx context.Context, slug string) error {
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+	if hadFSFiles {
+		_ = s.removeSessionDir(slug)
 	}
 	return nil
 }

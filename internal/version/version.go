@@ -11,4 +11,4 @@
 package version
 
 // Version is the current application version. Overridable via -ldflags -X.
-var Version = "v1.0.0"
+var Version = "v1.0.2"

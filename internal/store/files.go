@@ -4,8 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
-	"strings"
 	"time"
 )
 
@@ -23,13 +24,14 @@ func ReferencedFileIDs(content string) map[string]struct{} {
 }
 
 type File struct {
-	ID          string
-	SessionSlug string
-	Filename    string
-	MIME        string
-	Size        int64
-	Data        []byte
-	CreatedAt   time.Time
+	ID             string
+	SessionSlug    string
+	Filename       string
+	MIME           string
+	Size           int64
+	Data           []byte
+	CreatedAt      time.Time
+	StorageBackend string
 }
 
 type FileSummary struct {
@@ -44,52 +46,98 @@ type FileSummary struct {
 // AddFile stores a binary attachment for an existing session.
 // Returns ErrNotFound if the session doesn't exist (or is expired).
 func (s *Store) AddFile(ctx context.Context, slug, id, filename, mime string, data []byte) (*FileSummary, error) {
-	ok, err := s.Exists(ctx, slug)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, ErrNotFound
-	}
-	now := time.Now().UTC()
-	size := int64(len(data))
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO files (id, session_slug, filename, mime, size, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, slug, filename, mime, size, data, now.Unix())
-	if err != nil {
-		return nil, err
-	}
-	return &FileSummary{
-		ID:          id,
-		SessionSlug: slug,
-		Filename:    filename,
-		MIME:        mime,
-		Size:        size,
-		CreatedAt:   now,
-	}, nil
+	return retryOnBusy(func() (*FileSummary, error) {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback()
+
+		stats, err := s.sessionStatsTx(ctx, tx, slug)
+		if err != nil {
+			if errors.Is(err, ErrExpired) {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
+		if s.opts.MaxFilesPerSession > 0 && stats.FilesCount >= s.opts.MaxFilesPerSession {
+			return nil, ErrTooManyFiles
+		}
+		size := int64(len(data))
+		if s.opts.MaxSessionStorageBytes > 0 && stats.ContentSize+stats.FilesSize+size > s.opts.MaxSessionStorageBytes {
+			return nil, ErrSessionStorageExceeded
+		}
+
+		now := time.Now().UTC()
+		backend := s.opts.FileBackend
+		storedData := data
+		if backend == FileBackendFS {
+			storedData = []byte{}
+			if err := s.writeFSFile(slug, id, data); err != nil {
+				return nil, err
+			}
+		}
+
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO files (id, session_slug, filename, mime, size, data, created_at, storage_backend) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, slug, filename, mime, size, storedData, now.Unix(), backend)
+		if err != nil {
+			if backend == FileBackendFS {
+				_ = s.removeFSFile(slug, id)
+			}
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			if backend == FileBackendFS {
+				_ = s.removeFSFile(slug, id)
+			}
+			return nil, err
+		}
+
+		return &FileSummary{
+			ID:          id,
+			SessionSlug: slug,
+			Filename:    filename,
+			MIME:        mime,
+			Size:        size,
+			CreatedAt:   now,
+		}, nil
+	})
 }
 
 // GetFile returns the binary content + metadata. Returns ErrNotFound if missing
 // or ErrExpired if the parent session is expired.
 func (s *Store) GetFile(ctx context.Context, slug, id string) (*File, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT id, session_slug, filename, mime, size, data, created_at FROM files WHERE id = ? AND session_slug = ?`,
-		id, slug)
+	row := s.db.QueryRowContext(ctx, `SELECT f.id, f.session_slug, f.filename, f.mime, f.size, f.data, f.created_at, f.storage_backend, s.expires_at
+		FROM files f
+		JOIN sessions s ON s.slug = f.session_slug
+		WHERE f.id = ? AND f.session_slug = ?`, id, slug)
 	var f File
 	var created int64
-	if err := row.Scan(&f.ID, &f.SessionSlug, &f.Filename, &f.MIME, &f.Size, &f.Data, &created); err != nil {
+	var exp sql.NullInt64
+	if err := row.Scan(&f.ID, &f.SessionSlug, &f.Filename, &f.MIME, &f.Size, &f.Data, &created, &f.StorageBackend, &exp); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
 	f.CreatedAt = time.Unix(created, 0).UTC()
-	// Honour session-level expiry.
-	sess, err := s.Get(ctx, slug)
-	if err != nil {
-		return nil, err
+	if exp.Valid {
+		t := time.Unix(exp.Int64, 0).UTC()
+		if !time.Now().UTC().Before(t) {
+			return nil, ErrExpired
+		}
 	}
-	_ = sess
+	if f.StorageBackend == FileBackendFS {
+		data, err := os.ReadFile(s.fsFilePath(slug, id))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
+		f.Data = data
+	}
 	return &f, nil
 }
 
@@ -115,6 +163,37 @@ func (s *Store) ListFiles(ctx context.Context, slug string) ([]FileSummary, erro
 	return out, rows.Err()
 }
 
+func (s *Store) ListBundleFiles(ctx context.Context, slug string) ([]File, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, session_slug, filename, mime, size, data, created_at, storage_backend FROM files WHERE session_slug = ? ORDER BY created_at ASC`,
+		slug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []File
+	for rows.Next() {
+		var f File
+		var created int64
+		if err := rows.Scan(&f.ID, &f.SessionSlug, &f.Filename, &f.MIME, &f.Size, &f.Data, &created, &f.StorageBackend); err != nil {
+			return nil, err
+		}
+		f.CreatedAt = time.Unix(created, 0).UTC()
+		if f.StorageBackend == FileBackendFS {
+			data, err := os.ReadFile(s.fsFilePath(f.SessionSlug, f.ID))
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil, ErrNotFound
+				}
+				return nil, err
+			}
+			f.Data = data
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 // DeleteOrphanFiles removes attachments that are no longer reachable:
 //   - files whose session is gone (defensive net in case FK cascade is off);
 //   - files older than `grace` whose ID does not appear in any session content
@@ -125,7 +204,10 @@ func (s *Store) ListFiles(ctx context.Context, slug string) ([]FileSummary, erro
 func (s *Store) DeleteOrphanFiles(ctx context.Context, grace time.Duration) (int64, error) {
 	var total int64
 
-	// A) safety net: files referencing missing sessions.
+	missingSlugs, err := s.fsSessionSlugsWithoutSession(ctx)
+	if err != nil {
+		return total, err
+	}
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM files WHERE session_slug NOT IN (SELECT slug FROM sessions)`)
 	if err != nil {
@@ -136,67 +218,42 @@ func (s *Store) DeleteOrphanFiles(ctx context.Context, grace time.Duration) (int
 		return total, err
 	}
 	total += n
+	for _, slug := range missingSlugs {
+		_ = s.removeSessionDir(slug)
+	}
 
-	// B) per-session unreferenced markers.
 	cutoff := time.Now().Add(-grace).Unix()
-	rows, err := s.db.QueryContext(ctx, `SELECT slug, content FROM sessions`)
+	fsTargets, err := s.fsOrphanFiles(ctx, cutoff)
 	if err != nil {
 		return total, err
 	}
-	type entry struct {
-		slug    string
-		content string
-	}
-	var sessions []entry
-	for rows.Next() {
-		var e entry
-		if err := rows.Scan(&e.slug, &e.content); err != nil {
-			rows.Close()
-			return total, err
-		}
-		sessions = append(sessions, e)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
+	res, err = s.db.ExecContext(ctx, `DELETE FROM files
+		WHERE created_at <= ?
+		  AND session_slug IN (SELECT slug FROM sessions)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM file_refs r
+		      WHERE r.session_slug = files.session_slug AND r.file_id = files.id
+		  )`, cutoff)
+	if err != nil {
 		return total, err
 	}
-	rows.Close()
-
-	for _, e := range sessions {
-		refs := ReferencedFileIDs(e.content)
-		var (
-			res sql.Result
-			err error
-		)
-		if len(refs) == 0 {
-			res, err = s.db.ExecContext(ctx,
-				`DELETE FROM files WHERE session_slug = ? AND created_at <= ?`,
-				e.slug, cutoff)
-		} else {
-			placeholders := make([]string, 0, len(refs))
-			args := []any{e.slug, cutoff}
-			for id := range refs {
-				placeholders = append(placeholders, "?")
-				args = append(args, id)
-			}
-			q := `DELETE FROM files WHERE session_slug = ? AND created_at <= ? AND id NOT IN (` +
-				strings.Join(placeholders, ",") + `)`
-			res, err = s.db.ExecContext(ctx, q, args...)
-		}
-		if err != nil {
-			return total, err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return total, err
-		}
-		total += n
+	n, err = res.RowsAffected()
+	if err != nil {
+		return total, err
+	}
+	total += n
+	for _, target := range fsTargets {
+		_ = s.removeFSFile(target.slug, target.id)
 	}
 	return total, nil
 }
 
 // DeleteFile removes a single attachment.
 func (s *Store) DeleteFile(ctx context.Context, slug, id string) error {
+	backend, err := s.fileBackendForID(ctx, slug, id)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `DELETE FROM files WHERE id = ? AND session_slug = ?`, id, slug)
 	if err != nil {
 		return err
@@ -208,5 +265,197 @@ func (s *Store) DeleteFile(ctx context.Context, slug, id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	if backend == FileBackendFS {
+		_ = s.removeFSFile(slug, id)
+	}
 	return nil
+}
+
+func (s *Store) syncSessionRefsTx(ctx context.Context, tx *sql.Tx, slug, content string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM file_refs WHERE session_slug = ?`, slug); err != nil {
+		return err
+	}
+	refs := ReferencedFileIDs(content)
+	if len(refs) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO file_refs (session_slug, file_id) VALUES (?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for id := range refs {
+		if _, err := stmt.ExecContext(ctx, slug, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) backfillFileRefsIfNeeded() error {
+	var refsCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM file_refs`).Scan(&refsCount); err != nil {
+		return err
+	}
+	if refsCount != 0 {
+		return nil
+	}
+	var hasMarkers int
+	if err := s.db.QueryRow(`SELECT 1 FROM sessions WHERE content LIKE '%[file:%' LIMIT 1`).Scan(&hasMarkers); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(context.Background(), `SELECT slug, content FROM sessions`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var slug string
+		var content string
+		if err := rows.Scan(&slug, &content); err != nil {
+			return err
+		}
+		if err := s.syncSessionRefsTx(context.Background(), tx, slug, content); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) fsFilePath(slug, id string) string {
+	return filepath.Join(s.opts.FileStorageDir, slug, id)
+}
+
+func (s *Store) writeFSFile(slug, id string, data []byte) error {
+	dir := filepath.Join(s.opts.FileStorageDir, slug)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, id+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, s.fsFilePath(slug, id))
+}
+
+func (s *Store) removeFSFile(slug, id string) error {
+	err := os.Remove(s.fsFilePath(slug, id))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	_ = os.Remove(filepath.Join(s.opts.FileStorageDir, slug))
+	return nil
+}
+
+func (s *Store) removeSessionDir(slug string) error {
+	err := os.RemoveAll(filepath.Join(s.opts.FileStorageDir, slug))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) fileBackendForID(ctx context.Context, slug, id string) (string, error) {
+	var backend string
+	if err := s.db.QueryRowContext(ctx, `SELECT storage_backend FROM files WHERE id = ? AND session_slug = ?`, id, slug).Scan(&backend); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return backend, nil
+}
+
+func (s *Store) sessionHasFSFiles(ctx context.Context, slug string) (bool, error) {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM files WHERE session_slug = ? AND storage_backend = ?)`, slug, FileBackendFS).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists == 1, nil
+}
+
+func (s *Store) expiredFSSessionSlugs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT f.session_slug
+		FROM files f
+		JOIN sessions s ON s.slug = f.session_slug
+		WHERE f.storage_backend = ? AND s.expires_at IS NOT NULL AND s.expires_at <= ?`, FileBackendFS, time.Now().UTC().Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err != nil {
+			return nil, err
+		}
+		out = append(out, slug)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) fsSessionSlugsWithoutSession(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT session_slug FROM files WHERE storage_backend = ? AND session_slug NOT IN (SELECT slug FROM sessions)`, FileBackendFS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err != nil {
+			return nil, err
+		}
+		out = append(out, slug)
+	}
+	return out, rows.Err()
+}
+
+type fsTarget struct {
+	slug string
+	id   string
+}
+
+func (s *Store) fsOrphanFiles(ctx context.Context, cutoff int64) ([]fsTarget, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT session_slug, id FROM files
+		WHERE storage_backend = ?
+		  AND created_at <= ?
+		  AND session_slug IN (SELECT slug FROM sessions)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM file_refs r
+		      WHERE r.session_slug = files.session_slug AND r.file_id = files.id
+		  )`, FileBackendFS, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []fsTarget
+	for rows.Next() {
+		var target fsTarget
+		if err := rows.Scan(&target.slug, &target.id); err != nil {
+			return nil, err
+		}
+		out = append(out, target)
+	}
+	return out, rows.Err()
 }

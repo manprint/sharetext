@@ -36,6 +36,9 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.CloseNow()
+	if MaxContentSize > 0 {
+		c.SetReadLimit(MaxContentSize + 1024)
+	}
 
 	ch := a.Hub.Join(slug)
 	defer a.Hub.Leave(slug, ch)
@@ -77,12 +80,19 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
+		if MaxContentSize > 0 && int64(len(m.Content)) > MaxContentSize {
+			_ = c.Close(websocket.StatusMessageTooBig, "content too large")
+			return
+		}
 		sess, err := a.Store.Update(ctx, slug, m.Content)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrExpired) {
 				return
 			}
 			continue
+		}
+		if a.Metrics != nil {
+			a.Metrics.IncSessionUpdates()
 		}
 		out, _ := json.Marshal(toSessionResp(sess))
 		a.Hub.Broadcast(slug, out, ch)

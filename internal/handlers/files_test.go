@@ -107,6 +107,17 @@ func TestUploadUnknownSession(t *testing.T) {
 	}
 }
 
+func TestUploadUnknownSessionReturns404BeforeSizeCheck(t *testing.T) {
+	_, r := newFilesRouter(t)
+	old := MaxFileSize
+	MaxFileSize = 16
+	t.Cleanup(func() { MaxFileSize = old })
+	w := doUpload(t, r, "ghost", "big.bin", "application/octet-stream", []byte(strings.Repeat("x", 64)))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d", w.Code)
+	}
+}
+
 func TestUploadOversize(t *testing.T) {
 	api, r := newFilesRouter(t)
 	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "u3"}); err != nil {

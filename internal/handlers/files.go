@@ -49,6 +49,15 @@ func toFileResp(slug string, f *store.FileSummary) fileResp {
 // UploadFile accepts multipart/form-data with field "file" and stores it.
 func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
+	ok, err := a.Store.Exists(r.Context(), slug)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 	// Reject oversize early via MaxBytesReader.
 	r.Body = http.MaxBytesReader(w, r.Body, MaxFileSize+512*1024) // +slack for multipart overhead
 	if err := r.ParseMultipartForm(MaxFileSize + 512*1024); err != nil {
@@ -103,6 +112,9 @@ func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
+	if a.Metrics != nil {
+		a.Metrics.IncFilesUploaded()
+	}
 	writeJSON(w, http.StatusCreated, toFileResp(slug, sum))
 }
 
@@ -115,6 +127,9 @@ func (a *API) DownloadFile(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
+	if a.Metrics != nil {
+		a.Metrics.IncFileDownloads()
+	}
 	w.Header().Set("Content-Type", f.MIME)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", f.Size))
 	w.Header().Set("Content-Disposition", contentDisposition(f.Filename))
@@ -125,7 +140,7 @@ func (a *API) DownloadFile(w http.ResponseWriter, r *http.Request) {
 // ListFiles returns metadata-only list of attachments for a session.
 func (a *API) ListFiles(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if _, err := a.Store.Get(r.Context(), slug); err != nil {
+	if _, err := a.Store.GetSessionState(r.Context(), slug); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
@@ -149,10 +164,13 @@ func (a *API) Bundle(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
-	files, err := a.Store.ListFiles(r.Context(), slug)
+	files, err := a.Store.ListBundleFiles(r.Context(), slug)
 	if err != nil {
-		http.Error(w, "list failed", http.StatusInternalServerError)
+		writeStoreErr(w, err)
 		return
+	}
+	if a.Metrics != nil {
+		a.Metrics.IncBundlesGenerated()
 	}
 
 	w.Header().Set("Content-Type", "application/zip")
@@ -174,12 +192,8 @@ func (a *API) Bundle(w http.ResponseWriter, r *http.Request) {
 
 	// attachments
 	seen := make(map[string]int)
-	for _, fs := range files {
-		f, err := a.Store.GetFile(r.Context(), slug, fs.ID)
-		if err != nil {
-			continue
-		}
-		name := "files/" + uniqueZipName(seen, fs.Filename)
+	for _, f := range files {
+		name := "files/" + uniqueZipName(seen, f.Filename)
 		fw, err := zw.Create(name)
 		if err != nil {
 			return

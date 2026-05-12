@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -38,7 +39,7 @@ func BasicAuth(user, pass, realm string) func(http.Handler) http.Handler {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, withAdminUser(r, u))
 		})
 	}
 }
@@ -59,6 +60,19 @@ type adminSession struct {
 type adminListResp struct {
 	Sessions []adminSession `json:"sessions"`
 	Count    int            `json:"count"`
+}
+
+type adminAuditResp struct {
+	Enabled bool               `json:"enabled"`
+	Entries []store.AuditEntry `json:"entries"`
+	Count   int                `json:"count"`
+}
+
+type adminMetricsResp struct {
+	Metrics           any  `json:"metrics"`
+	ActiveRooms       int  `json:"active_rooms"`
+	ActiveConnections int  `json:"active_connections"`
+	Enabled           bool `json:"enabled"`
 }
 
 // AdminList returns all non-expired sessions.
@@ -103,8 +117,63 @@ func (a *API) AdminDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
 	}
+	_ = a.Store.RecordAudit(r.Context(), store.AuditEntry{
+		Actor:   adminActor(r),
+		Action:  "admin.delete_session",
+		Target:  slug,
+		Details: "",
+	})
 	// Best-effort: include the slug so the UI can confirm.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": slug})
+}
+
+func (a *API) AdminAudit(w http.ResponseWriter, r *http.Request) {
+	limit := a.AuditLogDefaultLimit
+	if limit <= 0 {
+		limit = 50
+	}
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	entries, err := a.Store.ListAuditLogs(r.Context(), limit)
+	if err != nil {
+		http.Error(w, "audit failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, adminAuditResp{
+		Enabled: a.Store.AuditEnabled(),
+		Entries: entries,
+		Count:   len(entries),
+	})
+}
+
+func (a *API) AdminMetrics(w http.ResponseWriter, r *http.Request) {
+	enabled := a.Metrics != nil && a.Metrics.Enabled()
+	rooms := 0
+	connections := 0
+	if a.Hub != nil {
+		rooms = a.Hub.ActiveRooms()
+		connections = a.Hub.ActiveConnections()
+	}
+	var snapshot any = map[string]any{"enabled": false}
+	if enabled {
+		snapshot = a.Metrics.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, adminMetricsResp{
+		Metrics:           snapshot,
+		ActiveRooms:       rooms,
+		ActiveConnections: connections,
+		Enabled:           enabled,
+	})
+}
+
+func adminActor(r *http.Request) string {
+	if user := AdminUserFromContext(r.Context()); user != "" {
+		return user
+	}
+	return "admin"
 }

@@ -52,14 +52,17 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 - Upload via bottone (selettore file, accoda alla fine del testo) o **drag & drop** sull'editor (inserisce nella riga dove avviene il drop).
 - Marker testuale `[file:<id>:<url-encoded-name>]` reso come riga speciale nel pannello righe (icona 📎, nome, size, download).
 - Download per singolo file dalla riga, oppure **bundle ZIP** (testo + tutti gli allegati) tramite il pulsante Scarica di sessione.
-- Limite per upload configurabile (`MAX_FILE_SIZE`).
-- File cascade-deleted con la sessione; orfani (marker rimossi dal testo) ripuliti dal cleanup periodico con grace window.
+- Backend storage configurabile: **SQLite BLOB** (`db`, comportamento legacy) oppure **filesystem** (`fs`).
+- Limiti operativi configurabili: `MAX_FILE_SIZE`, `MAX_FILES_PER_SESSION`, `MAX_SESSION_STORAGE_BYTES`.
+- File cascade-deleted con la sessione; orfani (marker rimossi dal testo) ripuliti dal cleanup periodico con grace window e riferimenti file normalizzati nel DB.
 
 **Admin**
 
 - Pannello `/admin` protetto da HTTP Basic Auth (confronto costante via `crypto/subtle`).
 - Elenco sessioni attive con metadata: tipo, dimensione (testo + somma allegati), creata/aggiornata/scade.
 - Eliminazione singola sessione (hard delete, FK cascade rimuove anche i file).
+- Audit log persistente delle delete admin.
+- Endpoint dedicato per metriche operative e stato dell'hub WebSocket.
 
 **Mobile**
 
@@ -77,6 +80,7 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 
 - Goroutine ogni `CLEANUP_INTERVAL`: hard-delete sessioni scadute + sweep file orfani (con grace).
 - DB sempre normalizzato; safety net SQL anche se le FK fossero off.
+- I riferimenti `[file:...]` vengono mantenuti incrementalmente in una tabella derivata, evitando full scan del testo a ogni cleanup.
 
 **Docker**
 
@@ -105,19 +109,47 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 
 ## Variabili d'ambiente
 
-| Variabile           | Default        | Descrizione                                                                |
-|---------------------|----------------|----------------------------------------------------------------------------|
-| `PORT`              | `8080`         | Porta HTTP                                                                 |
-| `DB_PATH`           | `sharetext.db` | File SQLite                                                                |
-| `SLUG_LEN`          | `16`           | Lunghezza della parte random dello slug                                    |
-| `CLEANUP_INTERVAL`  | `30s`          | Frequenza sweep cancellazione sessioni scadute + allegati orfani           |
-| `VACUUM_INTERVAL`   | `0s` (off)     | Frequenza `VACUUM` SQLite + `wal_checkpoint(TRUNCATE)` per reclaim spazio. `0` o vuoto = disabilitato. |
-| `FILE_GRACE`        | `60s`          | Finestra di grazia per upload appena fatti (evita race su marker)          |
-| `MAX_FILE_SIZE`     | `10485760`     | Limite massimo upload (byte). Default 10 MiB.                              |
-| `ADMIN_USER`        | _(unset)_      | Username Basic Auth per `/admin`. Se vuoto, admin disabilitato (503).      |
-| `ADMIN_PASS`        | _(unset)_      | Password Basic Auth per `/admin`. Se vuota, admin disabilitato (503).      |
+| Variabile | Default | Descrizione |
+|-----------|---------|-------------|
+| `PORT` | `8080` | Porta HTTP |
+| `DB_PATH` | `sharetext.db` | File SQLite |
+| `SLUG_LEN` | `16` | Lunghezza della parte random dello slug |
+| `CLEANUP_INTERVAL` | `30s` | Frequenza sweep cancellazione sessioni scadute + allegati orfani |
+| `REQUEST_TIMEOUT` | `30s` | Timeout middleware per le richieste HTTP |
+| `VACUUM_INTERVAL` | `0s` (off) | Frequenza `VACUUM` SQLite + `wal_checkpoint(TRUNCATE)` per reclaim spazio. `0` o vuoto = disabilitato. |
+| `FILE_GRACE` | `60s` | Finestra di grazia per upload appena fatti (evita race su marker) |
+| `MAX_FILE_SIZE` | `10485760` | Limite massimo upload per singolo file in byte. Default 10 MiB. |
+| `MAX_CONTENT_SIZE` | `4194304` | Limite massimo del contenuto testuale di sessione in byte. Vale per `PUT` e WebSocket. |
+| `MAX_FILES_PER_SESSION` | `256` | Numero massimo di allegati per sessione. `0` disabilita il limite. |
+| `MAX_SESSION_STORAGE_BYTES` | `104857600` | Quota massima complessiva per sessione: `len(content) + somma(size files)`. `0` disabilita il limite. |
+| `FILE_STORAGE_BACKEND` | `db` | Backend allegati: `db` (BLOB in SQLite) oppure `fs` (filesystem). |
+| `FILE_STORAGE_DIR` | `dirname(DB_PATH)/sharetext-files` | Directory base usata quando il backend allegati e' `fs`. |
+| `RATE_LIMIT_ENABLED` | `true` | Abilita il rate limit per-IP sui route pubblici e admin. |
+| `RATE_LIMIT_RPS` | `20` | Token/sec del rate limit pubblico. |
+| `RATE_LIMIT_BURST` | `60` | Burst massimo del rate limit pubblico. |
+| `RATE_LIMIT_TTL` | `10m` | TTL degli entry IP del rate limiter pubblico. |
+| `ADMIN_RATE_LIMIT_RPS` | `5` | Token/sec del rate limit admin. |
+| `ADMIN_RATE_LIMIT_BURST` | `15` | Burst massimo del rate limit admin. |
+| `ADMIN_RATE_LIMIT_TTL` | `10m` | TTL degli entry IP del rate limiter admin. |
+| `READ_HEADER_TIMEOUT` | `5s` | Timeout di lettura degli header HTTP. |
+| `WRITE_TIMEOUT` | `30s` | Timeout di scrittura della risposta HTTP. |
+| `IDLE_TIMEOUT` | `2m` | Timeout keep-alive HTTP. |
+| `MAX_HEADER_BYTES` | `1048576` | Limite massimo per gli header HTTP. |
+| `SECURITY_HEADERS_ENABLED` | `true` | Abilita CSP e altri header di hardening HTTP. |
+| `CONTENT_SECURITY_POLICY` | vedi default | Valore completo dell'header `Content-Security-Policy`. |
+| `FRAME_OPTIONS` | `DENY` | Valore di `X-Frame-Options`. |
+| `REFERRER_POLICY` | `no-referrer` | Valore di `Referrer-Policy`. |
+| `PERMISSIONS_POLICY` | `camera=(), microphone=(), geolocation=()` | Valore di `Permissions-Policy`. |
+| `STRICT_TRANSPORT_SECURITY` | _(unset)_ | Se impostata, viene inviata come `Strict-Transport-Security` su richieste HTTPS/proxy HTTPS. |
+| `METRICS_ENABLED` | `true` | Abilita la raccolta di metriche operative in memoria e l'endpoint admin dedicato. |
+| `AUDIT_LOG_ENABLED` | `true` | Abilita la persistenza degli audit log admin. |
+| `AUDIT_LOG_DEFAULT_LIMIT` | `50` | Limite di default di `/admin/api/audit` quando manca `?limit=`. |
+| `ADMIN_USER` | _(unset)_ | Username Basic Auth per `/admin`. Se vuoto, admin disabilitato (503). |
+| `ADMIN_PASS` | _(unset)_ | Password Basic Auth per `/admin`. Se vuota, admin disabilitato (503). |
 
 Compose passa tutto via env override (`${VAR:-default}`).
+
+Nota: il file `compose.yaml` incluso override alcuni default applicativi. In particolare imposta `VACUUM_INTERVAL=5m` e, se non sovrascritti, `ADMIN_USER=admin` e `ADMIN_PASS=changeme`.
 
 ---
 
@@ -170,11 +202,11 @@ Codici: `200` ok, `404` sconosciuto, `410 Gone` quando la sessione è scaduta (a
 
 ### `PUT /api/sessions/{slug}`
 
-Body `{"content": "..."}`. Stessi codici (`200/400/404/410`). Sul successo il server fa broadcast su tutti i WebSocket attivi della stessa stanza.
+Body `{"content": "..."}`. Stessi codici (`200/400/404/410`) piu' `413` se `content` supera `MAX_CONTENT_SIZE` oppure la quota totale della sessione (`MAX_SESSION_STORAGE_BYTES`). Sul successo il server fa broadcast su tutti i WebSocket attivi della stessa stanza.
 
 ### `GET /ws/{slug}` — WebSocket
 
-Messaggi JSON `{"content": "..."}` in entrambe le direzioni. Stato iniziale inviato alla connessione. Connessione rifiutata con `404` se lo slug non esiste o è scaduto.
+Messaggi JSON `{"content": "..."}` in entrambe le direzioni. Stato iniziale inviato alla connessione. Connessione rifiutata con `404` se lo slug non esiste o è scaduto. Messaggi oltre `MAX_CONTENT_SIZE` chiudono la connessione con close status `1009` (`message too big`).
 
 ### Esempi
 
@@ -199,7 +231,12 @@ curl -X PUT -H 'content-type: application/json' \
 
 ## Allegati (file)
 
-Una sessione può ospitare allegati binari. Vengono memorizzati nel DB con FK `ON DELETE CASCADE` sullo slug, quindi spariscono insieme alla sessione (admin delete o scadenza temporanea).
+Una sessione può ospitare allegati binari. Il metadata vive sempre nel DB con FK `ON DELETE CASCADE` sullo slug, quindi sparisce insieme alla sessione (admin delete o scadenza temporanea). Il payload del file puo' stare:
+
+- in SQLite (`FILE_STORAGE_BACKEND=db`, comportamento legacy);
+- su filesystem (`FILE_STORAGE_BACKEND=fs`, file sotto `FILE_STORAGE_DIR/<slug>/<id>`).
+
+Il backend viene registrato per ogni upload: cambiare backend in seguito non rompe gli allegati esistenti.
 
 ### Marker testuale
 
@@ -220,6 +257,8 @@ La riga deve essere intera (spazi prima/dopo tollerati). I marker possono conviv
 - **Drag & drop sull'editor**: i marker vengono inseriti come righe nuove all'inizio della riga in cui è avvenuto il drop (caret risolto via `caretPositionFromPoint` + fallback `caretRangeFromPoint`, ultimo fallback fine testo).
 - Persistenza: dopo l'upload il client fa `PUT /api/sessions/{slug}` esplicita (più affidabile del solo WS, soprattutto su mobile dove la connessione può non essere ancora aperta), e il server fa broadcast a tutti i peer.
 - Limite per file: `MAX_FILE_SIZE` (default 10 MiB) → eccesso → `413 Request Entity Too Large`.
+- Limiti di quota: `MAX_FILES_PER_SESSION` e `MAX_SESSION_STORAGE_BYTES`. Se superati, il server risponde `413`.
+- Validazione anticipata: upload su slug inesistente o scaduto viene rifiutato prima del parsing completo del multipart.
 
 ### Download
 
@@ -319,12 +358,16 @@ ADMIN_USER=admin ADMIN_PASS=secret just run
 # via compose: override in compose.yaml o tramite .env nella stessa cartella
 ```
 
+Attenzione: il `compose.yaml` del repository abilita l'admin di default con `admin/changeme` se non sovrascrivi esplicitamente le env. In ambienti reali conviene cambiarle o svuotarle entrambe per disabilitare il pannello.
+
 ### Endpoints
 
 | Metodo  | Path                              | Effetto                                  |
 |---------|-----------------------------------|------------------------------------------|
 | GET     | `/admin`                          | HTML del pannello                        |
 | GET     | `/admin/api/sessions`             | JSON elenco sessioni attive              |
+| GET     | `/admin/api/audit`                | JSON audit log admin                     |
+| GET     | `/admin/api/metrics`              | JSON metriche operative + stato hub      |
 | DELETE  | `/admin/api/sessions/{slug}`      | Elimina sessione (hard delete + cascade) |
 
 Esempio JSON `/admin/api/sessions`:
@@ -368,13 +411,56 @@ La UI mostra solo `total_size` nella colonna Size.
 
 ```bash
 curl -u admin:secret http://localhost:8080/admin/api/sessions
+curl -u admin:secret http://localhost:8080/admin/api/audit?limit=20
+curl -u admin:secret http://localhost:8080/admin/api/metrics
 curl -u admin:secret -X DELETE http://localhost:8080/admin/api/sessions/<slug>
+```
+
+Esempio JSON `/admin/api/audit`:
+
+```jsonc
+{
+  "enabled": true,
+  "count": 1,
+  "entries": [
+    {
+      "id": 12,
+      "actor": "admin",
+      "action": "admin.delete_session",
+      "target": "team-alpha-3vRdM58dftguriSe",
+      "created_at": "2026-05-12T15:01:00Z"
+    }
+  ]
+}
+```
+
+Esempio JSON `/admin/api/metrics`:
+
+```jsonc
+{
+  "enabled": true,
+  "active_rooms": 2,
+  "active_connections": 5,
+  "metrics": {
+    "enabled": true,
+    "sessions_created": 14,
+    "session_updates": 93,
+    "files_uploaded": 7,
+    "file_downloads": 11,
+    "bundles_generated": 3,
+    "cleanup_runs": 10,
+    "cleanup_deleted_sessions": 2,
+    "cleanup_deleted_files": 4,
+    "vacuum_runs": 1
+  }
+}
 ```
 
 Note di sicurezza:
 
 - Credenziali confrontate in tempo costante (`crypto/subtle`).
 - Basic Auth viaggia in chiaro: dietro reverse proxy usare sempre HTTPS.
+- I route admin hanno rate limit IP separato rispetto ai route pubblici.
 - Le sessioni scadute non compaiono in lista (filtrate via SQL `expires_at IS NULL OR expires_at > now`).
 
 ---
@@ -429,8 +515,9 @@ La goroutine `runCleanup` esegue a ogni tick (`CLEANUP_INTERVAL`):
 
 1. **Sessioni scadute** — `DELETE FROM sessions WHERE expires_at <= now()`. I file collegati vengono cascade-deleted via FK.
 2. **`DeleteOrphanFiles(grace)`**:
-   - **Safety net**: rimuove righe `files` con `session_slug` non più presente in `sessions` (eseguito anche se FK fossero disabilitate, per resilienza in caso di DB incoerente).
-   - **Per-sessione**: per ciascuna sessione attiva, estrae gli ID dei marker dal `content` (regex `\[file:(ID):`), elimina i file di quella sessione il cui `id` non compare *e* il cui `created_at <= now() - FILE_GRACE`.
+  - **Safety net**: rimuove righe `files` con `session_slug` non più presente in `sessions` (eseguito anche se FK fossero disabilitate, per resilienza in caso di DB incoerente).
+  - **Per-sessione**: usa la tabella derivata `file_refs`, sincronizzata a ogni `PUT`, per eliminare i file della sessione che non risultano piu' referenziati *e* il cui `created_at <= now() - FILE_GRACE`.
+  - **Filesystem**: se `FILE_STORAGE_BACKEND=fs`, rimuove anche i payload orfani e le directory sessione rimaste vuote.
 
 `FILE_GRACE` (default 60s) protegge gli upload appena fatti il cui marker non è ancora stato propagato via WS/PUT, evitando di cancellare un file che sta per essere referenziato.
 

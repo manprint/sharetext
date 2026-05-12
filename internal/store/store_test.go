@@ -11,8 +11,13 @@ import (
 
 func openTest(t *testing.T) *Store {
 	t.Helper()
+	return openTestWithOptions(t, Options{})
+}
+
+func openTestWithOptions(t *testing.T, opts Options) *Store {
+	t.Helper()
 	dir := t.TempDir()
-	s, err := Open(filepath.Join(dir, "test.db"))
+	s, err := OpenWithOptions(filepath.Join(dir, "test.db"), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,5 +361,16 @@ func TestDelete(t *testing.T) {
 	}
 	if err := s.Delete(ctx, "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestUpdateRespectsSessionStorageLimit(t *testing.T) {
+	s := openTestWithOptions(t, Options{MaxSessionStorageBytes: 5})
+	ctx := context.Background()
+	if _, err := s.Create(ctx, CreateOpts{Slug: "cap"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Update(ctx, "cap", "123456"); !errors.Is(err, ErrSessionStorageExceeded) {
+		t.Fatalf("want ErrSessionStorageExceeded, got %v", err)
 	}
 }

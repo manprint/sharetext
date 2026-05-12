@@ -92,3 +92,33 @@ func TestWSUnknownSlug(t *testing.T) {
 		t.Fatal("want dial error for missing slug")
 	}
 }
+
+func TestWSRejectsOversizedMessage(t *testing.T) {
+	srv, api := newWSServer(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "bigws"}); err != nil {
+		t.Fatal(err)
+	}
+	old := MaxContentSize
+	MaxContentSize = 5
+	t.Cleanup(func() { MaxContentSize = old })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "bigws"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	readJSON(t, ctx, c)
+	body, _ := json.Marshal(wsMsg{Content: "123456"})
+	if err := c.Write(ctx, websocket.MessageText, body); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = c.Read(ctx)
+	if err == nil {
+		t.Fatal("want close error after oversized payload")
+	}
+	if status := websocket.CloseStatus(err); status != websocket.StatusMessageTooBig {
+		t.Fatalf("want close status %d, got %d (err=%v)", websocket.StatusMessageTooBig, status, err)
+	}
+}
