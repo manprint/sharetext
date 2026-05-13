@@ -58,6 +58,15 @@ func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	clientID := strings.TrimSpace(r.Header.Get(ClientIDHeader))
+	snap, lockChanged, allowed := a.tryWriteLock(slug, clientID)
+	if !allowed {
+		writeLockDenied(w, snap)
+		return
+	}
+	if lockChanged && a.Hub != nil && a.Locks != nil {
+		a.broadcastLock(slug, a.Locks.State(slug), nil)
+	}
 	// Reject oversize early via MaxBytesReader.
 	r.Body = http.MaxBytesReader(w, r.Body, MaxFileSize+512*1024) // +slack for multipart overhead
 	if err := r.ParseMultipartForm(MaxFileSize + 512*1024); err != nil {

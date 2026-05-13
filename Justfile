@@ -1,7 +1,10 @@
 set shell := ["bash", "-cu"]
+set positional-arguments := true
+set dotenv-load := true
 
 binary  := "sharetext-server"
 image   := "sharetext:local"
+image_dev   := "fabiop85/sharetext:dev"
 port    := "8080"
 # Override at invocation: `just version=v1.2.3 build`
 version := env_var_or_default("VERSION", "")
@@ -11,6 +14,16 @@ ldflags := if version == "" { "-s -w" } else { "-s -w -X sharetext/internal/vers
 
 default:
     @just --list
+
+docker-login:
+    echo $DOCKER_PASSWORD | docker login --username $DOCKER_LOGIN --password-stdin
+
+push-docker-dev:
+    @just docker-login
+    docker buildx rm sharetext-builder || true
+    docker buildx create --use --name sharetext-builder || true
+    docker buildx build --platform linux/amd64,linux/arm64 -t {{image_dev}} --push .
+    docker buildx rm sharetext-builder || true
 
 # Run locally with go run
 run:
@@ -28,9 +41,9 @@ test:
 test-race:
     go test -race ./... -count=1
 
-# Run JS tests (block parser + countdown + download helpers)
+# Run JS tests (block parser + countdown + download helpers + editor lock)
 test-js:
-    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs
+    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs cmd/server/static/editor.test.mjs cmd/server/static/lock.test.mjs
 
 # Run all tests
 test-all: test test-js

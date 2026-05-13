@@ -17,6 +17,7 @@ type appConfig struct {
 	RequestTimeout          time.Duration
 	FileGrace               time.Duration
 	VacuumInterval          time.Duration
+	LockTTL                 time.Duration
 	MaxFileSize             int64
 	MaxContentSize          int64
 	MaxFilesPerSession      int
@@ -59,6 +60,7 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		RequestTimeout:          durationEnv(getenv, "REQUEST_TIMEOUT", 30*time.Second, 30*time.Second),
 		FileGrace:               durationEnv(getenv, "FILE_GRACE", 60*time.Second, 60*time.Second),
 		VacuumInterval:          durationEnv(getenv, "VACUUM_INTERVAL", 0, 0),
+		LockTTL:                 durationEnv(getenv, "LOCK_TTL", handlers.DefaultLockTTL, time.Second),
 		MaxFileSize:             int64Env(getenv, "MAX_FILE_SIZE", handlers.MaxFileSize),
 		MaxContentSize:          int64Env(getenv, "MAX_CONTENT_SIZE", handlers.MaxContentSize),
 		MaxFilesPerSession:      intEnv(getenv, "MAX_FILES_PER_SESSION", 256),

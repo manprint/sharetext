@@ -26,7 +26,7 @@ func newFilesRouter(t *testing.T) (*API, *chi.Mux) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	api := &API{Store: st, Hub: NewHub(), SlugLen: 16}
+	api := &API{Store: st, Hub: NewHub(), Locks: NewLockManager(0), SlugLen: 16}
 	r := chi.NewRouter()
 	r.Post("/api/sessions/{slug}/files", api.UploadFile)
 	r.Get("/api/sessions/{slug}/files", api.ListFiles)
@@ -36,6 +36,11 @@ func newFilesRouter(t *testing.T) (*API, *chi.Mux) {
 }
 
 func doUpload(t *testing.T, r *chi.Mux, slug, filename, mime string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	return doUploadWithClient(t, r, slug, "", filename, mime, body)
+}
+
+func doUploadWithClient(t *testing.T, r *chi.Mux, slug, clientID, filename, mime string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -53,6 +58,9 @@ func doUpload(t *testing.T, r *chi.Mux, slug, filename, mime string, body []byte
 
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+slug+"/files", &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if clientID != "" {
+		req.Header.Set(ClientIDHeader, clientID)
+	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
@@ -115,6 +123,50 @@ func TestUploadUnknownSessionReturns404BeforeSizeCheck(t *testing.T) {
 	w := doUpload(t, r, "ghost", "big.bin", "application/octet-stream", []byte(strings.Repeat("x", 64)))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d", w.Code)
+	}
+}
+
+func TestUploadRejectedWhenLockedByOther(t *testing.T) {
+	api, r := newFilesRouter(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "ulk"}); err != nil {
+		t.Fatal(err)
+	}
+	api.Locks.Acquire("ulk", "A")
+	w := doUploadWithClient(t, r, "ulk", "B", "a.txt", "text/plain", []byte("nope"))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("upload by B must be rejected, got %d body=%s", w.Code, w.Body.String())
+	}
+	// Lock state must remain with A.
+	if snap := api.Locks.State("ulk"); !snap.Held || snap.Holder != "A" {
+		t.Fatalf("lock must still belong to A, got %+v", snap)
+	}
+}
+
+func TestUploadAnonymousAllowedWhenFree(t *testing.T) {
+	api, r := newFilesRouter(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "uok"}); err != nil {
+		t.Fatal(err)
+	}
+	w := doUpload(t, r, "uok", "f.bin", "application/octet-stream", []byte("x"))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("free anon upload must succeed, got %d", w.Code)
+	}
+	if api.Locks.State("uok").Held {
+		t.Fatal("anonymous upload must not take the lock")
+	}
+}
+
+func TestUploadAcquiresLockForHolder(t *testing.T) {
+	api, r := newFilesRouter(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "uacq"}); err != nil {
+		t.Fatal(err)
+	}
+	w := doUploadWithClient(t, r, "uacq", "X", "f.bin", "application/octet-stream", []byte("x"))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("identified upload must succeed, got %d", w.Code)
+	}
+	if snap := api.Locks.State("uacq"); !snap.Held || snap.Holder != "X" {
+		t.Fatalf("upload must hold the lock for X, got %+v", snap)
 	}
 }
 

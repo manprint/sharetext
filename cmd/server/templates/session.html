@@ -7,12 +7,13 @@
   <title>sharetext · {{.Slug}}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body data-slug="{{.Slug}}">
   <header class="bar">
     <a href="/" class="brand">sharetext <span class="app-version">{{version}}</span></a>
     <div class="meta">
       <span id="countdown" class="countdown" hidden></span>
       <span class="status" id="status">offline</span>
+      <span id="lock-badge" class="lock-badge" hidden></span>
       <button id="toggle-view" class="mobile-only" type="button" aria-pressed="false">Modifica</button>
       <button id="copy-link">Copia link</button>
       <button id="upload-btn" type="button">Upload</button>
@@ -38,9 +39,6 @@
       <a class="primary" href="/">Torna alla home</a>
     </div>
   </div>
-  <script>
-    window.__SLUG__ = {{.Slug}};
-  </script>
   <script type="module" src="/static/app.js"></script>
 </body>
 </html>

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"sharetext/internal/handlers"
 	"sharetext/internal/store"
 )
 
@@ -23,8 +24,12 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		"METRICS_ENABLED":           "false",
 		"AUDIT_LOG_ENABLED":         "false",
 		"AUDIT_LOG_DEFAULT_LIMIT":   "75",
+		"LOCK_TTL":                  "25s",
 	}
 	cfg := loadConfigFromEnv(func(key string) string { return env[key] })
+	if cfg.LockTTL != 25*time.Second {
+		t.Fatalf("expected LOCK_TTL=25s, got %s", cfg.LockTTL)
+	}
 	if cfg.Port != "9090" || cfg.DBPath != "/tmp/sharetext.db" {
 		t.Fatalf("unexpected basic config: %+v", cfg)
 	}
@@ -66,5 +71,8 @@ func TestLoadConfigFromEnvFallsBackOnInvalidValues(t *testing.T) {
 	}
 	if cfg.ReadHeaderTimeout != 5*time.Second || cfg.MaxHeaderBytes != 1<<20 {
 		t.Fatalf("expected defaults for invalid timeout/header, got %+v", cfg)
+	}
+	if cfg.LockTTL != handlers.DefaultLockTTL {
+		t.Fatalf("expected LOCK_TTL default %s, got %s", handlers.DefaultLockTTL, cfg.LockTTL)
 	}
 }

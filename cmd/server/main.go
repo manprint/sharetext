@@ -41,7 +41,14 @@ func main() {
 	}
 	defer st.Close()
 
-	api := &handlers.API{Store: st, Hub: handlers.NewHub(), SlugLen: cfg.SlugLen, Metrics: metrics, AuditLogDefaultLimit: cfg.AuditLogDefaultLimit}
+	api := &handlers.API{
+		Store:                st,
+		Hub:                  handlers.NewHub(),
+		Locks:                handlers.NewLockManager(cfg.LockTTL),
+		SlugLen:              cfg.SlugLen,
+		Metrics:              metrics,
+		AuditLogDefaultLimit: cfg.AuditLogDefaultLimit,
+	}
 
 	tplFS, err := fs.Sub(assets, "templates")
 	if err != nil {
@@ -165,7 +172,7 @@ func main() {
 		if cfg.VacuumInterval > 0 {
 			vacuumMode = cfg.VacuumInterval.String()
 		}
-		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, file_grace=%s, vacuum=%s, admin=%s, max_file=%dB, max_content=%dB, file_backend=%s)", version.Version, cfg.Port, cfg.DBPath, cfg.CleanupInterval, cfg.FileGrace, vacuumMode, adminMode, handlers.MaxFileSize, handlers.MaxContentSize, cfg.FileStorageBackend)
+		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, file_grace=%s, vacuum=%s, admin=%s, lock_ttl=%s, max_file=%dB, max_content=%dB, file_backend=%s)", version.Version, cfg.Port, cfg.DBPath, cfg.CleanupInterval, cfg.FileGrace, vacuumMode, adminMode, cfg.LockTTL, handlers.MaxFileSize, handlers.MaxContentSize, cfg.FileStorageBackend)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}

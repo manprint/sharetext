@@ -117,6 +117,9 @@ func (a *API) AdminDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
 	}
+	if a.Locks != nil {
+		a.Locks.Forget(slug)
+	}
 	_ = a.Store.RecordAudit(r.Context(), store.AuditEntry{
 		Actor:   adminActor(r),
 		Action:  "admin.delete_session",
