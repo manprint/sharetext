@@ -24,7 +24,7 @@ func newTestAPI(t *testing.T) (*API, *chi.Mux) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	api := &API{Store: st, Hub: NewHub(), SlugLen: 16}
+	api := &API{Store: st, Hub: NewHub(), Locks: NewLockManager(5 * time.Second), SlugLen: 16}
 	r := chi.NewRouter()
 	r.Post("/api/sessions", api.CreateSession)
 	r.Get("/api/sessions/{slug}", api.GetSession)
@@ -228,5 +228,108 @@ func TestUpdateExpiredReturns410(t *testing.T) {
 	w := doJSON(t, r, http.MethodPut, "/api/sessions/old", updateReq{Content: "x"})
 	if w.Code != http.StatusGone {
 		t.Fatalf("want 410, got %d", w.Code)
+	}
+}
+
+func putWithClient(t *testing.T, r *chi.Mux, slug, clientID, content string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(updateReq{Content: content})
+	req := httptest.NewRequest(http.MethodPut, "/api/sessions/"+slug, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if clientID != "" {
+		req.Header.Set(ClientIDHeader, clientID)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func TestUpdateAcquiresLockForClient(t *testing.T) {
+	api, r := newTestAPI(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "lk1"}); err != nil {
+		t.Fatal(err)
+	}
+	w := putWithClient(t, r, "lk1", "A", "hello")
+	if w.Code != http.StatusOK {
+		t.Fatalf("first writer must succeed, got %d body=%s", w.Code, w.Body.String())
+	}
+	snap := api.Locks.State("lk1")
+	if !snap.Held || snap.Holder != "A" {
+		t.Fatalf("lock must be held by A after first write, got %+v", snap)
+	}
+}
+
+func TestUpdateRejectedWhenOtherHolds(t *testing.T) {
+	api, r := newTestAPI(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "lk2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.Locks.Acquire("lk2", "A"); !ok {
+		t.Fatal("setup acquire failed")
+	}
+	w := putWithClient(t, r, "lk2", "B", "boom")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("B must be rejected with 409, got %d body=%s", w.Code, w.Body.String())
+	}
+	// Content must not have changed.
+	sess, err := api.Store.Get(context.Background(), "lk2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Content != "" {
+		t.Fatalf("content must remain empty, got %q", sess.Content)
+	}
+}
+
+func TestUpdateAnonymousAllowedWhenLockFree(t *testing.T) {
+	api, r := newTestAPI(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "lk3"}); err != nil {
+		t.Fatal(err)
+	}
+	w := putWithClient(t, r, "lk3", "", "anon")
+	if w.Code != http.StatusOK {
+		t.Fatalf("anonymous write must succeed when free, got %d", w.Code)
+	}
+	if api.Locks.State("lk3").Held {
+		t.Fatal("anonymous write must not take the lock")
+	}
+}
+
+func TestUpdateAnonymousRejectedWhenLockHeld(t *testing.T) {
+	api, r := newTestAPI(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "lk4"}); err != nil {
+		t.Fatal(err)
+	}
+	api.Locks.Acquire("lk4", "A")
+	w := putWithClient(t, r, "lk4", "", "anon")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("anonymous write must be rejected while A holds, got %d", w.Code)
+	}
+}
+
+func TestUpdateHolderReWritesFreely(t *testing.T) {
+	api, r := newTestAPI(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "lk5"}); err != nil {
+		t.Fatal(err)
+	}
+	if w := putWithClient(t, r, "lk5", "A", "v1"); w.Code != http.StatusOK {
+		t.Fatalf("v1: want 200, got %d", w.Code)
+	}
+	if w := putWithClient(t, r, "lk5", "A", "v2"); w.Code != http.StatusOK {
+		t.Fatalf("v2: want 200, got %d", w.Code)
+	}
+}
+
+func TestUpdateTooLargeReturns413(t *testing.T) {
+	api, r := newTestAPI(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "big"}); err != nil {
+		t.Fatal(err)
+	}
+	old := MaxContentSize
+	MaxContentSize = 5
+	t.Cleanup(func() { MaxContentSize = old })
+	w := doJSON(t, r, http.MethodPut, "/api/sessions/big", updateReq{Content: "123456"})
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("want 413, got %d body=%s", w.Code, w.Body.String())
 	}
 }

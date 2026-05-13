@@ -13,21 +13,24 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"sharetext/internal/store"
+	"sharetext/internal/telemetry"
 )
 
 func newAdminRouter(t *testing.T, user, pass string) (*API, *chi.Mux) {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "admin.db"))
+	st, err := store.OpenWithOptions(filepath.Join(dir, "admin.db"), store.Options{AuditLogEnabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	api := &API{Store: st, Hub: NewHub(), SlugLen: 16}
+	api := &API{Store: st, Hub: NewHub(), SlugLen: 16, Metrics: telemetry.NewMetrics(true), AuditLogDefaultLimit: 50}
 	r := chi.NewRouter()
 	r.Group(func(g chi.Router) {
 		g.Use(BasicAuth(user, pass, "admin"))
 		g.Get("/admin/api/sessions", api.AdminList)
+		g.Get("/admin/api/audit", api.AdminAudit)
+		g.Get("/admin/api/metrics", api.AdminMetrics)
 		g.Delete("/admin/api/sessions/{slug}", api.AdminDelete)
 	})
 	return api, r
@@ -187,7 +190,6 @@ func TestAdminDelete(t *testing.T) {
 		t.Fatalf("want 200, got %d", w.Code)
 	}
 
-	// Second delete → 404
 	req2 := httptest.NewRequest(http.MethodDelete, "/admin/api/sessions/doomed", nil)
 	req2.Header.Set("Authorization", basicAuthHeader("admin", "secret"))
 	w2 := httptest.NewRecorder()
@@ -208,8 +210,79 @@ func TestAdminDeleteUnauthorized(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", w.Code)
 	}
-	// Session must still exist
 	if _, err := api.Store.Get(context.Background(), "safe"); err != nil {
 		t.Fatalf("session deleted without auth: %v", err)
+	}
+}
+
+func TestAdminDeleteWritesAuditEntry(t *testing.T) {
+	api, r := newAdminRouter(t, "admin", "secret")
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "audit-me"}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/sessions/audit-me", nil)
+	req.Header.Set("Authorization", basicAuthHeader("admin", "secret"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	req2 := httptest.NewRequest(http.MethodGet, "/admin/api/audit?limit=1", nil)
+	req2.Header.Set("Authorization", basicAuthHeader("admin", "secret"))
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("audit want 200, got %d", w2.Code)
+	}
+	var resp adminAuditResp
+	if err := json.NewDecoder(w2.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Enabled || resp.Count != 1 {
+		t.Fatalf("unexpected audit response: %+v", resp)
+	}
+	if resp.Entries[0].Actor != "admin" || resp.Entries[0].Action != "admin.delete_session" || resp.Entries[0].Target != "audit-me" {
+		t.Fatalf("unexpected audit entry: %+v", resp.Entries[0])
+	}
+}
+
+func TestAdminMetrics(t *testing.T) {
+	api, r := newAdminRouter(t, "admin", "secret")
+	api.Metrics.IncSessionsCreated()
+	api.Metrics.IncSessionUpdates()
+	api.Metrics.IncFilesUploaded()
+	ch := api.Hub.Join("room")
+	defer api.Hub.Leave("room", ch)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/metrics", nil)
+	req.Header.Set("Authorization", basicAuthHeader("admin", "secret"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	var resp struct {
+		Enabled           bool           `json:"enabled"`
+		ActiveRooms       int            `json:"active_rooms"`
+		ActiveConnections int            `json:"active_connections"`
+		Metrics           map[string]any `json:"metrics"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Enabled {
+		t.Fatal("metrics should be enabled")
+	}
+	if resp.ActiveRooms != 1 || resp.ActiveConnections != 1 {
+		t.Fatalf("unexpected hub stats: %+v", resp)
+	}
+	if got := resp.Metrics["sessions_created"]; got != float64(1) {
+		t.Fatalf("sessions_created want 1, got %#v", got)
+	}
+	if got := resp.Metrics["session_updates"]; got != float64(1) {
+		t.Fatalf("session_updates want 1, got %#v", got)
+	}
+	if got := resp.Metrics["files_uploaded"]; got != float64(1) {
+		t.Fatalf("files_uploaded want 1, got %#v", got)
 	}
 }
