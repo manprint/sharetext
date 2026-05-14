@@ -4,7 +4,8 @@ set dotenv-load := true
 
 binary  := "sharetext-server"
 image   := "sharetext:local"
-image_dev   := "fabiop85/sharetext:dev"
+image_dev_x86   := "fabiop85/sharetext:devx86"
+image_dev_arm64 := "fabiop85/sharetext:devarm64"
 port    := "8080"
 # Override at invocation: `just version=v1.2.3 build`
 version := env_var_or_default("VERSION", "")
@@ -18,11 +19,18 @@ default:
 docker-login:
     echo $DOCKER_PASSWORD | docker login --username $DOCKER_LOGIN --password-stdin
 
-push-docker-dev:
+push-docker-dev-x86:
     @just docker-login
     docker buildx rm sharetext-builder || true
     docker buildx create --use --name sharetext-builder || true
-    docker buildx build --platform linux/amd64,linux/arm64 -t {{image_dev}} --push .
+    docker buildx build --platform linux/amd64 -t {{image_dev_x86}} --push .
+    docker buildx rm sharetext-builder || true
+
+push-docker-dev-armo64:
+    @just docker-login
+    docker buildx rm sharetext-builder || true
+    docker buildx create --use --name sharetext-builder || true
+    docker buildx build --platform linux/arm64 -t {{image_dev_arm64}} --push .
     docker buildx rm sharetext-builder || true
 
 # Run locally with go run
@@ -43,7 +51,7 @@ test-race:
 
 # Run JS tests (block parser + countdown + download helpers + editor lock)
 test-js:
-    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs cmd/server/static/editor.test.mjs cmd/server/static/lock.test.mjs
+    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs cmd/server/static/editor.test.mjs cmd/server/static/lock.test.mjs cmd/server/static/linkify.test.mjs
 
 # Run all tests
 test-all: test test-js

@@ -1,4 +1,5 @@
 import { parseBlocks } from './blocks.js';
+import { appendLinkified } from './linkify.js';
 import { formatRemaining, msUntil, isExpired } from './countdown.js';
 import { buildFilename, downloadText } from './download.js';
 import { parseFileMarker, buildFileMarker, formatBytes, insertMarkersAtPosition } from './files.js';
@@ -137,10 +138,10 @@ function renderItems(text) {
     li.className = item.type === 'block' ? 'item block' : 'item line';
     const txt = document.createElement(item.type === 'block' ? 'pre' : 'span');
     txt.className = 'txt';
-    if (item.type === 'block') {
-      txt.textContent = item.text;
+    if (item.type === 'line' && item.text === '') {
+      txt.textContent = ' ';
     } else {
-      txt.textContent = item.text === '' ? ' ' : item.text;
+      appendLinkified(txt, item.text);
     }
 
     const isEmptyLine = item.type === 'line' && item.text === '';
