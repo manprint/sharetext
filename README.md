@@ -12,6 +12,7 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 - [Allegati (file)](#allegati-file)
 - [Formato blocchi](#formato-blocchi)
 - [Lock di modifica](#lock-di-modifica)
+- [Comandi editor](#comandi-editor)
 - [Vista righe & UI mobile](#vista-righe--ui-mobile)
 - [Admin](#admin)
 - [Sessioni temporanee — scadenza](#sessioni-temporanee--scadenza)
@@ -50,7 +51,7 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 
 **Allegati**
 
-- Upload via bottone (selettore file, accoda alla fine del testo) o **drag & drop** sull'editor (inserisce nella riga dove avviene il drop).
+- Upload via bottone (selettore file, inserisce alla posizione corrente del cursore) o **drag & drop** sull'editor (inserisce nella riga dove avviene il drop).
 - Marker testuale `[file:<id>:<url-encoded-name>]` reso come riga speciale nel pannello righe (icona 📎, nome, size, download).
 - Download per singolo file dalla riga, oppure **bundle ZIP** (testo + tutti gli allegati) tramite il pulsante Scarica di sessione.
 - Backend storage configurabile: **SQLite BLOB** (`db`, comportamento legacy) oppure **filesystem** (`fs`).
@@ -286,7 +287,7 @@ La riga deve essere intera (spazi prima/dopo tollerati). I marker possono conviv
 
 ### Caricamento
 
-- **Bottone Upload** (header): apre selettore file, accoda i marker dopo l'ultima riga (con `\n` separatore).
+- **Bottone Upload** (header): apre selettore file, inserisce i marker alla **posizione corrente del cursore** nella textarea (`$content.selectionStart` viene catturato prima di aprire la dialog, così il valore sopravvive al blur). Quando la textarea non è mai stata focalizzata i marker vengono accodati a fine testo. I marker restano sempre su riga intera (vincolo del parser `FILE_RE`): viene anteposto un `\n` solo se il cursore non era a inizio riga, e un `\n` di chiusura solo se il testo successivo non inizia già con `\n`. In questo modo non vengono introdotte righe vuote di troppo: inserire il marker subito prima di un newline esistente lascia esattamente *una* riga marker fra le due porzioni di testo.
 - **Drag & drop sull'editor**: i marker vengono inseriti come righe nuove all'inizio della riga in cui è avvenuto il drop (caret risolto via `caretPositionFromPoint` + fallback `caretRangeFromPoint`, ultimo fallback fine testo).
 - Persistenza: dopo l'upload il client fa `PUT /api/sessions/{slug}` esplicita (più affidabile del solo WS, soprattutto su mobile dove la connessione può non essere ancora aperta), e il server fa broadcast a tutti i peer.
 - Limite per file: `MAX_FILE_SIZE` (default 10 MiB) → eccesso → `413 Request Entity Too Large`.
@@ -383,6 +384,67 @@ Le operazioni di **scrittura** (edit testuale, upload file, drag&drop) sono mutu
 ### Compatibilita' legacy
 
 I client che ignorano l'header `X-Client-ID` e i messaggi tipizzati continuano a funzionare quando il lock e' libero: la PUT/POST procede in modalita' "anonima" senza acquisire ownership. Diventa un `409` solo quando un altro utente sta gia' editando.
+
+---
+
+## Comandi editor
+
+L'editor riconosce **slash command** inline. In qualsiasi punto del testo, digitando `/` si apre un **dropdown autocomplete** con tutti i comandi disponibili; continuando a digitare la lista si filtra per prefisso. Il comando selezionato sostituisce il token `/nome` esattamente al cursore.
+
+### Rilevamento token
+
+- Pattern: `/` seguito da zero o più caratteri `[a-zA-Z0-9_-]`, con il caret immediatamente dopo l'ultimo carattere del nome.
+- Il `/` deve trovarsi a inizio buffer oppure essere preceduto da whitespace (` `, tab, `\n`, `\r`). Questo evita falsi positivi su URL (`https://...`) e path inline.
+- Il caret deve essere *alla fine* del token: se l'utente sposta il cursore in mezzo a un comando già scritto, il dropdown non si apre.
+- Funziona ovunque nel testo: inizio riga, mid-line, dopo un blocco `-----`, prima/dopo un marker file.
+
+### Dropdown
+
+| Tasto         | Effetto |
+|---------------|---------|
+| `↑` / `↓`     | Naviga le voci. |
+| `Enter` o `Tab` | Esegue la voce evidenziata. |
+| `Esc`         | Chiude il dropdown senza eseguire. |
+| Click su voce | Esegue quella voce (il focus resta sulla textarea). |
+
+Il dropdown si chiude automaticamente quando:
+
+- il caret si sposta fuori dal token (frecce, click, selezione altrove);
+- l'utente digita un carattere non-name (spazio, punteggiatura, newline);
+- nessun comando registrato corrisponde al prefisso;
+- la textarea perde il focus;
+- il [lock di modifica](#lock-di-modifica) passa ad altro utente.
+
+### Comandi disponibili
+
+| Comando      | Effetto |
+|--------------|---------|
+| `/timestamp` | Sostituisce esattamente il token `/timestamp` con la data e ora locale correnti nel formato `DD-MM-YYYY_HH-MM-SS`. Caret posizionato a fine timestamp; il testo circostante non viene toccato. |
+| `/upload`    | Sostituisce il token `/upload` con i marker `[file:<id>:<url-encoded-name>]` dei file selezionati (uno per file, su righe nuove). Se il `/` non era a inizio riga viene inserito un newline prima dei marker per rispettare il vincolo "marker su riga intera". Se l'utente annulla la dialog, il token resta semplicemente rimosso. |
+
+Pulsante Upload dell'header e drag & drop usano lo stesso meccanismo di inserzione: il bottone inserisce alla **posizione corrente del cursore** (con fallback a fine testo se la textarea non è mai stata focalizzata), drag & drop continua a inserire all'inizio della riga in cui è avvenuto il drop. Tutti e tre i flussi (`/upload`, bottone, drag & drop) condividono `insertMarkersAtPosition`, che antepone un `\n` quando l'offset non è a inizio riga per preservare l'invariante "marker su riga intera".
+
+### Garanzie
+
+- Il dispatch è gated dal [lock di modifica](#lock-di-modifica): se un altro utente detiene il lock, il dropdown non compare e l'esecuzione è bloccata insieme al resto della scrittura.
+- Le modifiche prodotte dai comandi viaggiano sullo stesso percorso di un edit utente: render locale → debounce → WS `edit` (con auto-acquisizione del lock) → broadcast ai peer.
+- Per `/upload` il flusso di upload riusa `POST /api/sessions/{slug}/files` + `PUT /api/sessions/{slug}` esistente, quindi i limiti di quota (`MAX_FILE_SIZE`, `MAX_FILES_PER_SESSION`, `MAX_SESSION_STORAGE_BYTES`) e i 409 di lock sono propagati come per gli altri flussi.
+
+### Estendere con un nuovo comando
+
+Il registry vive in `cmd/server/static/commands.js`. È sufficiente importare `registerCommand` da `app.js` (o da un nuovo modulo importato da `app.js`) e registrare un handler:
+
+```js
+import { registerCommand } from './commands.js';
+
+registerCommand('shout', (ctx) => {
+  // ctx = { name, args, text, caret, tokenStart, tokenEnd }
+  // Sostituisci ctx.text.slice(ctx.tokenStart, ctx.tokenEnd) col tuo output
+  // e applica via applyProgrammaticEdit(nextValue, newCaret).
+});
+```
+
+L'handler può essere `async` (il dispatcher attende la `Promise`). Le primitive utili esposte da `commands.js` sono `findSlashTokenAtCaret`, `filterCommands`, `formatTimestamp` — tutte pure function coperte da `commands.test.mjs`.
 
 ---
 
@@ -688,6 +750,7 @@ just test-js        # solo JS (node:test)
 - `countdown.test.mjs`: formattazione `MM:SS`/`HH:MM:SS`, `msUntil`, `isExpired` (persistente = mai scaduto).
 - `download.test.mjs`: `safeFilename` (caratteri proibiti, controllo, truncate 80, fallback), `buildFilename` (slug/kind/index, sanitize, defaults).
 - `files.test.mjs`: `parseFileMarker` (valid, encoded, whitespace, inline rejection, malformed, non-string), `buildFileMarker` (roundtrip, fallback), `formatBytes`.
+- `commands.test.mjs`: `findSlashTokenAtCaret` (token a fine buffer / dopo whitespace / a inizio riga, prefissi parziali, URL e path interni rifiutati, caret in mezzo a un token, clamp out-of-range, non-string), `filterCommands` (match prefisso case-insensitive), `formatTimestamp` (zero padding, valori massimi, default `now`), registry (`registerCommand` validazione + handler async, `dispatchCommand` happy/unknown/missing-ctx).
 
 ---
 
@@ -730,8 +793,10 @@ cmd/server/
     countdown.js           helpers countdown (formattazione, msUntil, isExpired)
     download.js            helpers download client-side (sanitize filename, blob trigger)
     files.js               parser marker file, builder marker, formatBytes
+    commands.js            registry slash-command + parser + formatTimestamp
     admin.js               client admin: list, delete, mobile cards
     blocks.test.mjs        node:test
+    commands.test.mjs      node:test
     countdown.test.mjs     node:test
     download.test.mjs      node:test
     files.test.mjs         node:test

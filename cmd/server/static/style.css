@@ -361,6 +361,36 @@ textarea#content.drag-over {
 }
 .toast.show { opacity: 1; }
 
+/* slash command palette */
+.cmd-menu {
+  position: fixed;
+  z-index: 300;
+  min-width: 12rem;
+  max-width: 22rem;
+  max-height: 14rem;
+  overflow: auto;
+  background: var(--bg, #ffffff);
+  color: var(--fg, #0f172a);
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(15, 23, 42, 0.18);
+  padding: 4px 0;
+  font-size: 0.9rem;
+  -webkit-overflow-scrolling: touch;
+}
+.cmd-menu[hidden] { display: none; }
+.cmd-item {
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+.cmd-item:hover { background: #f5f4f2; }
+.cmd-item.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
 /* admin page */
 .badge {
   font-size: 0.7rem;
