@@ -45,6 +45,38 @@ export function buildFileMarker(id, name) {
 }
 
 /**
+ * insertMarkersAtPosition(text, at, markers) → new string with the markers
+ * inserted at offset `at`, each on its own line, prefixing/suffixing only the
+ * minimum amount of `\n` needed to keep markers on a whole line.
+ *
+ * The file-marker grammar requires each marker to be the only content on its
+ * line (see `FILE_RE` above), so the function:
+ *   - prepends `\n` when the preceding content doesn't already end with one,
+ *   - appends `\n` only when the following content doesn't already start with
+ *     one (avoids creating a stray blank line when inserting just before an
+ *     existing newline).
+ *
+ * @param {string} text
+ * @param {number} at
+ * @param {string[]} markers
+ * @returns {string}
+ */
+export function insertMarkersAtPosition(text, at, markers) {
+  if (typeof text !== 'string') text = '';
+  if (!Array.isArray(markers) || markers.length === 0) return text;
+  const max = text.length;
+  let pos = Number.isFinite(at) ? at : max;
+  if (pos < 0) pos = 0;
+  if (pos > max) pos = max;
+  const before = text.slice(0, pos);
+  const after = text.slice(pos);
+  const block = markers.join('\n');
+  const prefix = before.length === 0 || before.endsWith('\n') ? '' : '\n';
+  const suffix = after.startsWith('\n') ? '' : '\n';
+  return before + prefix + block + suffix + after;
+}
+
+/**
  * formatBytes(n) → human-readable size.
  *
  * @param {number} n

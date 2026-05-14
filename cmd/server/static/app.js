@@ -1,7 +1,7 @@
 import { parseBlocks } from './blocks.js';
 import { formatRemaining, msUntil, isExpired } from './countdown.js';
 import { buildFilename, downloadText } from './download.js';
-import { parseFileMarker, buildFileMarker, formatBytes } from './files.js';
+import { parseFileMarker, buildFileMarker, formatBytes, insertMarkersAtPosition } from './files.js';
 import { shouldApplyRemoteContent, shouldFlushPendingLocalChanges } from './sync.js';
 import {
   classifyLock,
@@ -13,6 +13,13 @@ import {
   LOCK_STATE_MINE,
   LOCK_STATE_THEIRS,
 } from './lock.js';
+import {
+  registerCommand,
+  findSlashTokenAtCaret,
+  filterCommands,
+  dispatchCommand,
+  formatTimestamp,
+} from './commands.js';
 
 const slug = document.body.dataset.slug;
 const $content = document.getElementById('content');
@@ -69,6 +76,7 @@ let lockExpiresAt = null;
 let lastUserInputAt = 0;
 let heartbeatTimer = null;
 let idleTimer = null;
+let pendingUploadOffset = null;
 
 function setStatus(online) {
   $status.textContent = online ? 'online' : 'offline';
@@ -451,6 +459,216 @@ function connect() {
   });
 }
 
+function applyProgrammaticEdit(nextValue, caret) {
+  suppressSend = true;
+  $content.value = nextValue;
+  try {
+    const c = Math.max(0, Math.min(caret, nextValue.length));
+    $content.setSelectionRange(c, c);
+  } catch {}
+  suppressSend = false;
+  hasPendingLocalChanges = true;
+  lastUserInputAt = Date.now();
+  renderItems(nextValue);
+  if (shouldRequestLock(lockState)) {
+    wsSend({ type: 'lock_acquire' });
+  }
+  scheduleIdleRelease();
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => send($content.value), 250);
+}
+
+registerCommand('timestamp', (ctx) => {
+  const stamp = formatTimestamp();
+  const before = ctx.text.slice(0, ctx.tokenStart);
+  const after = ctx.text.slice(ctx.tokenEnd);
+  applyProgrammaticEdit(before + stamp + after, ctx.tokenStart + stamp.length);
+});
+
+registerCommand('upload', (ctx) => {
+  if (!$fileInput) return;
+  // Strip the `/upload` token. Markers will be inserted at the same position
+  // by handleUploads() once files are picked.
+  const before = ctx.text.slice(0, ctx.tokenStart);
+  const after = ctx.text.slice(ctx.tokenEnd);
+  applyProgrammaticEdit(before + after, ctx.tokenStart);
+  pendingUploadOffset = ctx.tokenStart;
+  try { $fileInput.click(); } catch {}
+});
+
+// ───────────────────────────── command palette ─────────────────────────────
+
+const $cmdMenu = document.createElement('div');
+$cmdMenu.className = 'cmd-menu';
+$cmdMenu.setAttribute('role', 'listbox');
+$cmdMenu.hidden = true;
+document.body.appendChild($cmdMenu);
+
+let menuItems = [];
+let menuIndex = 0;
+let menuToken = null;
+
+function caretCoords(textarea, position) {
+  // Mirror-div technique: clone textarea styling into an invisible div, copy
+  // text up to `position`, append a sentinel span and read its offsetLeft/Top
+  // → pixel coords of the caret in viewport space.
+  const div = document.createElement('div');
+  const style = window.getComputedStyle(textarea);
+  const props = [
+    'boxSizing', 'width', 'height', 'overflowX', 'overflowY',
+    'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+    'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+    'fontStyle', 'fontVariant', 'fontWeight', 'fontStretch', 'fontSize',
+    'lineHeight', 'fontFamily', 'textAlign', 'textTransform', 'textIndent',
+    'letterSpacing', 'wordSpacing', 'tabSize',
+  ];
+  props.forEach((p) => { div.style[p] = style[p]; });
+  div.style.position = 'absolute';
+  div.style.visibility = 'hidden';
+  div.style.whiteSpace = 'pre-wrap';
+  div.style.wordWrap = 'break-word';
+  div.style.top = '0';
+  div.style.left = '-9999px';
+  div.textContent = textarea.value.substring(0, position);
+  const span = document.createElement('span');
+  span.textContent = textarea.value.substring(position) || '.';
+  div.appendChild(span);
+  document.body.appendChild(div);
+  const rect = textarea.getBoundingClientRect();
+  const x = rect.left + span.offsetLeft - textarea.scrollLeft;
+  const y = rect.top + span.offsetTop - textarea.scrollTop;
+  const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4;
+  document.body.removeChild(div);
+  return { x, y, height: lineHeight };
+}
+
+function renderMenu() {
+  $cmdMenu.innerHTML = '';
+  menuItems.forEach((name, i) => {
+    const it = document.createElement('div');
+    it.className = 'cmd-item' + (i === menuIndex ? ' active' : '');
+    it.setAttribute('role', 'option');
+    it.textContent = '/' + name;
+    it.addEventListener('mousedown', (e) => {
+      e.preventDefault(); // keep focus in textarea
+      menuIndex = i;
+      executeMenuSelection();
+    });
+    $cmdMenu.appendChild(it);
+  });
+}
+
+function positionMenu(slashAt) {
+  const coords = caretCoords($content, slashAt);
+  const pad = 4;
+  // Default placement: just below the caret line.
+  let top = coords.y + coords.height + pad;
+  let left = coords.x;
+  // Render once so we can measure, then constrain to viewport.
+  $cmdMenu.style.top = `${top}px`;
+  $cmdMenu.style.left = `${left}px`;
+  $cmdMenu.hidden = false;
+  const mb = $cmdMenu.getBoundingClientRect();
+  if (mb.right > window.innerWidth - pad) {
+    left = Math.max(pad, window.innerWidth - mb.width - pad);
+  }
+  if (mb.bottom > window.innerHeight - pad) {
+    top = Math.max(pad, coords.y - mb.height - pad);
+  }
+  $cmdMenu.style.top = `${top}px`;
+  $cmdMenu.style.left = `${left}px`;
+}
+
+function showMenu(token) {
+  const items = filterCommands(token.name);
+  if (items.length === 0) { hideMenu(); return; }
+  // Reset index when the matching set changes.
+  const prev = menuToken;
+  menuToken = token;
+  menuItems = items;
+  if (!prev || prev.slashAt !== token.slashAt) menuIndex = 0;
+  else if (menuIndex >= items.length) menuIndex = 0;
+  renderMenu();
+  positionMenu(token.slashAt);
+}
+
+function hideMenu() {
+  if (!$cmdMenu.hidden) {
+    $cmdMenu.hidden = true;
+    $cmdMenu.innerHTML = '';
+  }
+  menuToken = null;
+  menuItems = [];
+  menuIndex = 0;
+}
+
+function menuVisible() {
+  return !$cmdMenu.hidden && menuItems.length > 0 && menuToken != null;
+}
+
+function updateCommandMenu() {
+  if (expiredHandled || !canEditNow(lockState)) { hideMenu(); return; }
+  const token = findSlashTokenAtCaret($content.value, $content.selectionStart);
+  if (!token) { hideMenu(); return; }
+  showMenu(token);
+}
+
+function executeMenuSelection() {
+  if (!menuVisible()) return;
+  const cmdName = menuItems[menuIndex];
+  const token = menuToken;
+  hideMenu();
+  Promise.resolve(dispatchCommand({
+    name: cmdName,
+    args: '',
+    text: $content.value,
+    caret: $content.selectionStart,
+    tokenStart: token.slashAt,
+    tokenEnd: token.nameEnd,
+  })).catch((err) => {
+    console.error('command failed', err);
+    toast(`Comando /${cmdName} fallito`);
+  });
+}
+
+$content.addEventListener('keydown', (ev) => {
+  if (expiredHandled || !menuVisible()) return;
+  if (ev.isComposing) return;
+  switch (ev.key) {
+    case 'ArrowDown':
+      ev.preventDefault();
+      menuIndex = (menuIndex + 1) % menuItems.length;
+      renderMenu();
+      return;
+    case 'ArrowUp':
+      ev.preventDefault();
+      menuIndex = (menuIndex - 1 + menuItems.length) % menuItems.length;
+      renderMenu();
+      return;
+    case 'Enter':
+    case 'Tab':
+      ev.preventDefault();
+      executeMenuSelection();
+      return;
+    case 'Escape':
+      ev.preventDefault();
+      hideMenu();
+      return;
+  }
+});
+
+$content.addEventListener('blur', () => {
+  // Delay so a mousedown on the menu can still trigger executeMenuSelection.
+  setTimeout(() => { if (document.activeElement !== $content) hideMenu(); }, 100);
+});
+
+document.addEventListener('selectionchange', () => {
+  if (document.activeElement === $content) updateCommandMenu();
+});
+
+window.addEventListener('resize', () => { if (menuVisible()) positionMenu(menuToken.slashAt); });
+window.addEventListener('scroll', () => { if (menuVisible()) positionMenu(menuToken.slashAt); }, true);
+
 $content.addEventListener('beforeinput', (ev) => {
   if (expiredHandled) return;
   if (!canEditNow(lockState)) {
@@ -476,6 +694,7 @@ $content.addEventListener('input', () => {
   scheduleIdleRelease();
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => send($content.value), 250);
+  updateCommandMenu();
 });
 
 window.addEventListener('beforeunload', () => {
@@ -536,12 +755,6 @@ function startOfLine(text, offset) {
   return nl === -1 ? 0 : nl + 1;
 }
 
-function insertLines(text, at, lines) {
-  let block = lines.join('\n');
-  // Ensure trailing newline so the marker becomes its own line.
-  if (!block.endsWith('\n')) block += '\n';
-  return text.slice(0, at) + block + text.slice(at);
-}
 
 async function pushContent(text) {
   // Persist via PUT so the change survives even when the WebSocket is not yet
@@ -602,7 +815,7 @@ async function handleUploads(files, atOffset) {
     const value = $content.value;
     const next = atOffset == null
       ? appendAtEnd(value, markers)
-      : insertLines(value, startOfLine(value, atOffset), markers);
+      : insertMarkersAtPosition(value, atOffset, markers);
     $content.value = next;
     renderItems(next);
     await pushContent(next);
@@ -611,13 +824,24 @@ async function handleUploads(files, atOffset) {
 }
 
 if ($uploadBtn && $fileInput) {
-  $uploadBtn.addEventListener('click', () => $fileInput.click());
+  $uploadBtn.addEventListener('click', () => {
+    // Capture the textarea caret BEFORE opening the dialog, so the marker is
+    // inserted where the user was editing rather than appended at the end.
+    // selectionStart survives blur in modern browsers; fall back to end-of-text
+    // only when the textarea has never been focused (value is empty / null).
+    if (pendingUploadOffset == null) {
+      const sel = typeof $content.selectionStart === 'number' ? $content.selectionStart : null;
+      pendingUploadOffset = sel == null ? $content.value.length : sel;
+    }
+    $fileInput.click();
+  });
   $fileInput.addEventListener('change', () => {
     const files = Array.from($fileInput.files || []);
     $fileInput.value = '';
+    const offset = pendingUploadOffset;
+    pendingUploadOffset = null;
     if (files.length === 0) return;
-    // Append after the last existing line.
-    handleUploads(files, null);
+    handleUploads(files, offset);
   });
 }
 
@@ -647,7 +871,10 @@ function onDrop(ev) {
     return;
   }
   const offset = caretOffsetFromEvent(ev);
-  handleUploads(Array.from(ev.dataTransfer.files), offset);
+  // Drag&drop keeps the "insert at start of the drop line" semantics; the
+  // command-driven /upload path passes a precise inline position instead.
+  const lineStart = startOfLine($content.value, offset);
+  handleUploads(Array.from(ev.dataTransfer.files), lineStart);
 }
 
 $content.addEventListener('dragenter', onDragEnter);
