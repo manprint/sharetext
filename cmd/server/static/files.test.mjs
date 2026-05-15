@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseFileMarker, buildFileMarker, buildFileMarkerRaw, formatBytes, insertMarkersAtPosition } from './files.js';
+import { parseFileMarker, buildFileMarker, buildFileMarkerRaw, formatBytes, insertMarkersAtPosition, extractMarkerIds } from './files.js';
 
 test('parseFileMarker: valid plain', () => {
   assert.deepEqual(parseFileMarker('[file:abc123:notes.txt]'),
@@ -134,4 +134,39 @@ test('insertMarkersAtPosition: every produced marker line is a parseable file ma
   const lines = out.split('\n');
   assert.ok(parseFileMarker(lines[1]));
   assert.ok(parseFileMarker(lines[2]));
+});
+
+test('extractMarkerIds: empty text yields empty set', () => {
+  const ids = extractMarkerIds('');
+  assert.equal(ids.size, 0);
+});
+
+test('extractMarkerIds: single plain marker', () => {
+  const ids = extractMarkerIds('hello\n[file:abc123:notes.txt]\nworld');
+  assert.deepEqual([...ids], ['abc123']);
+});
+
+test('extractMarkerIds: multiple markers, dedup by id', () => {
+  const ids = extractMarkerIds('[file:aaa:x]\n[file:bbb:y]\n[file:aaa:z]');
+  assert.deepEqual([...ids].sort(), ['aaa', 'bbb']);
+});
+
+test('extractMarkerIds: e2e encrypted name slot accepted (regex stops at colon)', () => {
+  // Encrypted name slot is `iv.ct` — base64url + dot + base64url. Regex
+  // captures the id and stops at the colon, regardless of name shape.
+  const ids = extractMarkerIds('[file:abc_DEF-123:AAAA.BBBB]');
+  assert.deepEqual([...ids], ['abc_DEF-123']);
+});
+
+test('extractMarkerIds: inline marker still detected (loose scan)', () => {
+  // Unlike parseFileMarker which requires whole-line, extractMarkerIds is a
+  // loose scan because all we care about is "did a new id show up".
+  const ids = extractMarkerIds('blah [file:abc:x] in the middle');
+  assert.deepEqual([...ids], ['abc']);
+});
+
+test('extractMarkerIds: non-string input → empty set, no throw', () => {
+  assert.equal(extractMarkerIds(null).size, 0);
+  assert.equal(extractMarkerIds(undefined).size, 0);
+  assert.equal(extractMarkerIds(42).size, 0);
 });

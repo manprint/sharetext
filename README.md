@@ -560,7 +560,9 @@ L'app è una Progressive Web App installabile: manifest, icone, service worker e
 
 Le risorse cacheate dal service worker sono opache: testo cifrato resta cifrato anche nella cache. La decifratura avviene client-side post-`fetch`/post-`match`, quindi il SW non altera né legge il plaintext.
 
-**Attenzione su cache del SW e versioning.** Il SW cachea `app.js`, `crypto.js`, `e2e-state.js` con strategia *cache-first* (vedi `sw-routes.js`). Quando si rilascia un fix lato JS (in particolare al pipeline di decifratura) è **obbligatorio bumpare `internal/version/version.go`**, perché il nome cache è `static-{Version}`: senza bump i browser continuano a servire l'`app.js` cacheato e il fix non entra mai in vigore. Il primo commit dopo questa regressione ha bumpato `v1.1.0 → v1.1.1` esattamente per questo motivo.
+**Invalidazione automatica della cache su deploy.** Il SW cachea `app.js`, `crypto.js`, `e2e-state.js` con strategia *cache-first* (vedi `sw-routes.js`). Il nome delle cache è `{kind}-{Version}-{BuildID}`, dove `BuildID` è un hash SHA-256 calcolato a startup su **tutti i file embeddati** (statici + template). Anche riutilizzando lo stesso tag `VERSION` su deploy successivi (tipico in dev), ogni modifica a un file statico cambia il `BuildID` → cambia il nome cache → `activate` evicta le cache vecchie → i client riscaricano il bundle. Nessuna perdita dati: le cache `api-` e `files-` sono solo copie temporanee di risposte server (i dati canonici vivono in SQLite), quindi il next online fetch ripopola.
+
+Bumpare `internal/version/version.go` resta utile per **etichettare** la release in UI/log; non è più necessario per invalidare la cache.
 
 ---
 
@@ -822,6 +824,7 @@ just vet            # go vet
 ### Go
 
 - `cmd/server` (config loader): override env, fallback su valori invalidi, default `LOCK_TTL` / `LOCK_IDLE_RELEASE` / `WS_READ_TIMEOUT` (con rifiuto valori sotto 1s), defaults e override del bucket `CREATE_RATE_LIMIT_*`.
+- `cmd/server` (build id): `computeBuildID` deterministico sugli asset embeddati; due chiamate sullo stesso FS producono lo stesso digest, una variazione di contenuto produce un digest diverso (pinato via fixture in-tree).
 - `internal/session`:
   - `NewSlug` (length, alfabeto, unicità su 1000 iterazioni);
   - `ValidName` (regex, edge case lunghezza, accenti, caratteri proibiti);
@@ -849,7 +852,7 @@ just vet            # go vet
 - `blocks.test.mjs`: parser blocchi (input vuoto, blocchi singoli/multipli/spaiati/vuoti, whitespace, righe contenenti `-----`).
 - `countdown.test.mjs`: formattazione `MM:SS`/`HH:MM:SS`, `msUntil`, `isExpired` (persistente = mai scaduto).
 - `download.test.mjs`: `safeFilename` (caratteri proibiti, controllo, truncate 80, fallback), `buildFilename` (slug/kind/index, sanitize, defaults).
-- `files.test.mjs`: `parseFileMarker` (valid, encoded, whitespace, inline rejection, malformed, non-string), `buildFileMarker` (roundtrip, fallback), `formatBytes`.
+- `files.test.mjs`: `parseFileMarker` (valid, encoded, whitespace, inline rejection, malformed, non-string), `buildFileMarker` (roundtrip, fallback), `formatBytes`, `extractMarkerIds` (set diff su markers — usato dal refresh meta on-peer-upload).
 - `commands.test.mjs`: `findSlashTokenAtCaret` (token a fine buffer / dopo whitespace / a inizio riga, prefissi parziali, URL e path interni rifiutati, caret in mezzo a un token, clamp out-of-range, non-string), `filterCommands` (match prefisso case-insensitive), `formatTimestamp` (zero padding, valori massimi, default `now`), registry (`registerCommand` validazione + handler async, `dispatchCommand` happy/unknown/missing-ctx).
 - `crypto.test.mjs`: roundtrip `encryptText`/`decryptText`, unicità IV su due encrypt dello stesso plaintext, ciphertext-su-empty-string conserva prefisso `enc:v1:`, tampering byte → `OperationError`, roundtrip binario via `encryptBytes`/`decryptBytes`, encoding nome cifrato (`encryptName`/`decryptName`), `isCiphertext`/`isEncryptedName` discrimination.
 - `bundle-client.test.mjs`: builder ZIP STORE method (no compressione) per sessioni E2E — build + parsing entries via `DecompressionStream` di un consumer-side, dedup nomi duplicati, bytes integrity.

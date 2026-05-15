@@ -6,11 +6,18 @@
  * unit-testable from node:test without faking a service worker scope.
  */
 const VERSION = "{{.Version}}";
+// BUILD_ID is a content hash injected at server start. It changes whenever
+// any embedded asset changes, so even repeated deploys of the same VERSION
+// tag (typical in dev) get fresh cache buckets and old caches are evicted
+// in `activate`. Combining VERSION and BUILD_ID makes the cache name
+// human-debuggable AND auto-invalidating.
+const BUILD_ID = "{{.BuildID}}";
+const CACHE_KEY = VERSION + "-" + BUILD_ID;
 const CACHE = {
-  static:  "static-" + VERSION,
-  shells:  "shells-" + VERSION,
-  api:     "api-" + VERSION,
-  files:   "files-" + VERSION,
+  static:  "static-" + CACHE_KEY,
+  shells:  "shells-" + CACHE_KEY,
+  api:     "api-" + CACHE_KEY,
+  files:   "files-" + CACHE_KEY,
 };
 const KNOWN_PREFIXES = ["static-", "shells-", "api-", "files-"];
 

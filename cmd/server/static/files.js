@@ -47,6 +47,24 @@ export function buildFileMarker(id, name) {
 }
 
 /**
+ * extractMarkerIds(text) → Set<string> of file ids referenced by any marker
+ * embedded in `text`. Order-independent. Used to detect when a peer's edit
+ * introduces a new attachment so the local metadata cache can be refreshed
+ * before the editor renders the marker as "(allegato cifrato)" forever.
+ *
+ * @param {string} text
+ * @returns {Set<string>}
+ */
+export function extractMarkerIds(text) {
+  const ids = new Set();
+  if (typeof text !== 'string') return ids;
+  const re = /\[file:([A-Za-z0-9_-]+):/g;
+  let m;
+  while ((m = re.exec(text)) !== null) ids.add(m[1]);
+  return ids;
+}
+
+/**
  * buildFileMarkerRaw(id, encodedName) → marker string with `encodedName`
  * inserted into the name slot as-is (no URL encoding). Used by the E2E
  * upload path which already produces a base64url-encoded `iv.ct` payload

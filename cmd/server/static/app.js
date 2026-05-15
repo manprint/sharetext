@@ -8,6 +8,7 @@ import {
   buildFileMarkerRaw,
   formatBytes,
   insertMarkersAtPosition,
+  extractMarkerIds,
 } from './files.js';
 import { shouldApplyRemoteContent, shouldFlushPendingLocalChanges } from './sync.js';
 import {
@@ -403,7 +404,32 @@ async function applyRemote(rawContent, { initialSnapshot = false } = {}) {
   renderItems(plain);
   lastSent = plain;
   lastServerContent = plain;
+  // Peer may have just uploaded an attachment: any marker id we don't know
+  // about must trigger a metadata refresh, otherwise the file row renders
+  // "(allegato cifrato)" forever and the download click yields the raw
+  // ciphertext blob.
+  refreshFileMetaIfStale(plain);
   return true;
+}
+
+let fileMetaInFlight = null;
+async function refreshFileMetaIfStale(plainText) {
+  const ids = extractMarkerIds(plainText);
+  let stale = false;
+  for (const id of ids) {
+    if (!fileMetaCache.has(id)) { stale = true; break; }
+  }
+  if (!stale) return;
+  // Single in-flight refresh; concurrent edits coalesce.
+  if (!fileMetaInFlight) {
+    fileMetaInFlight = (async () => {
+      try { await loadFileMeta(); }
+      finally { fileMetaInFlight = null; }
+      // Re-render so newly cached names/sizes land in the rows.
+      renderItems($content.value);
+    })();
+  }
+  await fileMetaInFlight;
 }
 
 async function send(content) {

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"html/template"
 	"io/fs"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	texttemplate "text/template"
 	"time"
@@ -94,7 +97,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("parse sw template: %v", err)
 	}
-	swData := struct{ Version string }{Version: version.Version}
+	// BuildID changes whenever any embedded asset changes, even when Version
+	// stays the same (typical in dev where the same tag is reused across
+	// rebuilds). The service worker uses it in its cache name, so a new
+	// deploy automatically evicts the stale code caches on the next page load
+	// without any manual version bump. Data caches (api-, files-) are keyed
+	// the same way — repopulated on next online fetch, no actual loss.
+	buildID, err := computeBuildID(assets)
+	if err != nil {
+		log.Fatalf("compute build id: %v", err)
+	}
+	swData := struct {
+		Version string
+		BuildID string
+	}{Version: version.Version, BuildID: buildID}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
@@ -315,4 +331,38 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// computeBuildID returns a deterministic 16-character hex digest computed
+// over every embedded file's path and content. Two builds with the same
+// embedded assets produce the same id; any change to even a single static
+// asset (or template) produces a different one. Sorting the paths makes
+// the walk order irrelevant to the result.
+func computeBuildID(efs embed.FS) (string, error) {
+	var paths []string
+	if err := fs.WalkDir(efs, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		paths = append(paths, path)
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	sort.Strings(paths)
+	h := sha256.New()
+	for _, p := range paths {
+		b, err := fs.ReadFile(efs, p)
+		if err != nil {
+			return "", err
+		}
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+		h.Write(b)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
