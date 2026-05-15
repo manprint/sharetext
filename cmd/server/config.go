@@ -15,7 +15,6 @@ type appConfig struct {
 	SlugLen                 int
 	CleanupInterval         time.Duration
 	RequestTimeout          time.Duration
-	FileGrace               time.Duration
 	VacuumInterval          time.Duration
 	LockTTL                 time.Duration
 	LockIdleRelease         time.Duration
@@ -67,7 +66,6 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		SlugLen:                 intEnv(getenv, "SLUG_LEN", 16),
 		CleanupInterval:         durationEnv(getenv, "CLEANUP_INTERVAL", 30*time.Second, 30*time.Second),
 		RequestTimeout:          durationEnv(getenv, "REQUEST_TIMEOUT", 30*time.Second, 30*time.Second),
-		FileGrace:               durationEnv(getenv, "FILE_GRACE", 60*time.Second, 60*time.Second),
 		VacuumInterval:          durationEnv(getenv, "VACUUM_INTERVAL", 0, 0),
 		LockTTL:                 durationEnv(getenv, "LOCK_TTL", handlers.DefaultLockTTL, time.Second),
 		LockIdleRelease:         durationEnv(getenv, "LOCK_IDLE_RELEASE", 3*time.Second, time.Second),

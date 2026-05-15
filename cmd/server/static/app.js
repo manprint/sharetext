@@ -9,6 +9,8 @@ import {
   formatBytes,
   insertMarkersAtPosition,
   extractMarkerIds,
+  extractFileMarkers,
+  resolveFileMarkerName,
 } from './files.js';
 import { shouldApplyRemoteContent, shouldFlushPendingLocalChanges } from './sync.js';
 import {
@@ -314,9 +316,9 @@ function renderFileRow(li, num, fm) {
 
   const cached = fileMetaCache.get(fm.id);
   // Prefer the plaintext name from the meta cache (populated by
-  // loadFileMeta() or the upload response). When the marker carries an
-  // encrypted name and the cache hasn't been filled yet, fall back to a
-  // placeholder rather than printing the ciphertext.
+  // loadFileMeta(), local marker decryption, or the upload response). When
+  // the marker carries an encrypted name and the cache hasn't been filled
+  // yet, fall back to a placeholder rather than printing the ciphertext.
   const displayName =
     (cached && cached.name) ||
     (isEncryptedName(fm.encodedName) ? '(allegato cifrato)' : fm.name);
@@ -348,7 +350,16 @@ function renderFileRow(li, num, fm) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const ct = new Uint8Array(await res.arrayBuffer());
       const pt = await decryptBytes(cryptoKey, ct);
-      const meta2 = fileMetaCache.get(fm.id);
+      let meta2 = fileMetaCache.get(fm.id);
+      if (!meta2 || !meta2.name || meta2.name === '(allegato cifrato)') {
+        const markerName = await resolveFileMarkerName(fm, cryptoKey);
+        meta2 = {
+          ...(meta2 || {}),
+          name: markerName,
+          encryptedName: isEncryptedName(fm.encodedName) ? fm.encodedName : null,
+        };
+        fileMetaCache.set(fm.id, meta2);
+      }
       const mime = (meta2 && meta2.mime) || 'application/octet-stream';
       const blob = new Blob([pt], { type: mime });
       const url = URL.createObjectURL(blob);
@@ -413,11 +424,45 @@ async function applyRemote(rawContent, { initialSnapshot = false } = {}) {
 }
 
 let fileMetaInFlight = null;
+async function refreshMarkerNamesIfStale(plainText) {
+  if (sessionMode !== 'e2e' || !cryptoKey) return;
+  const markers = extractFileMarkers(plainText);
+  let stale = false;
+  for (const marker of markers) {
+    if (!isEncryptedName(marker.encodedName)) continue;
+    const cached = fileMetaCache.get(marker.id);
+    if (!cached || !cached.name || cached.name === '(allegato cifrato)') {
+      stale = true;
+      break;
+    }
+  }
+  if (!stale) return;
+  let changed = false;
+  for (const marker of markers) {
+    if (!isEncryptedName(marker.encodedName)) continue;
+    const cached = fileMetaCache.get(marker.id);
+    if (cached && cached.name && cached.name !== '(allegato cifrato)') continue;
+    const plainName = await resolveFileMarkerName(marker, cryptoKey);
+    const next = {
+      ...(cached || {}),
+      name: plainName,
+      encryptedName: marker.encodedName,
+    };
+    if (!cached || cached.name !== next.name || cached.encryptedName !== next.encryptedName) {
+      fileMetaCache.set(marker.id, next);
+      changed = true;
+    }
+  }
+  if (changed) renderItems($content.value);
+}
+
 async function refreshFileMetaIfStale(plainText) {
+  await refreshMarkerNamesIfStale(plainText);
   const ids = extractMarkerIds(plainText);
   let stale = false;
   for (const id of ids) {
-    if (!fileMetaCache.has(id)) { stale = true; break; }
+    const cached = fileMetaCache.get(id);
+    if (!cached || !Number.isFinite(cached.size)) { stale = true; break; }
   }
   if (!stale) return;
   // Single in-flight refresh; concurrent edits coalesce.

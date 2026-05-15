@@ -231,7 +231,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go runCleanup(ctx, st, cfg.CleanupInterval, cfg.FileGrace, metrics)
+	go runCleanup(ctx, st, cfg.CleanupInterval, metrics)
 	if cfg.VacuumInterval > 0 {
 		go runVacuum(ctx, st, cfg.VacuumInterval, metrics)
 	}
@@ -245,7 +245,7 @@ func main() {
 		if cfg.VacuumInterval > 0 {
 			vacuumMode = cfg.VacuumInterval.String()
 		}
-		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, file_grace=%s, vacuum=%s, admin=%s, lock_ttl=%s, max_file=%dB, max_content=%dB, file_backend=%s)", version.Version, cfg.Port, cfg.DBPath, cfg.CleanupInterval, cfg.FileGrace, vacuumMode, adminMode, cfg.LockTTL, handlers.MaxFileSize, handlers.MaxContentSize, cfg.FileStorageBackend)
+		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, vacuum=%s, admin=%s, lock_ttl=%s, max_file=%dB, max_content=%dB, file_backend=%s)", version.Version, cfg.Port, cfg.DBPath, cfg.CleanupInterval, vacuumMode, adminMode, cfg.LockTTL, handlers.MaxFileSize, handlers.MaxContentSize, cfg.FileStorageBackend)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}
@@ -260,7 +260,7 @@ func main() {
 	}
 }
 
-func runCleanup(ctx context.Context, st *store.Store, every, fileGrace time.Duration, metrics *telemetry.Metrics) {
+func runCleanup(ctx context.Context, st *store.Store, every time.Duration, metrics *telemetry.Metrics) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	doSweep := func() {
@@ -275,7 +275,7 @@ func runCleanup(ctx context.Context, st *store.Store, every, fileGrace time.Dura
 			deletedSessions = n
 			log.Printf("cleanup: deleted %d expired session(s)", n)
 		}
-		if n, err := st.DeleteOrphanFiles(cctx, fileGrace); err != nil {
+		if n, err := st.DeleteOrphanFiles(cctx); err != nil {
 			log.Printf("cleanup files: %v", err)
 		} else if n > 0 {
 			deletedFiles = n

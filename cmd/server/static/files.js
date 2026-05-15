@@ -1,3 +1,5 @@
+import { decryptName, isEncryptedName } from './crypto.js';
+
 /**
  * File-marker parsing helpers for the lines view.
  *
@@ -62,6 +64,47 @@ export function extractMarkerIds(text) {
   let m;
   while ((m = re.exec(text)) !== null) ids.add(m[1]);
   return ids;
+}
+
+/**
+ * extractFileMarkers(text) → parsed file markers found on their own lines,
+ * preserving order. Used to resolve encrypted marker names locally even when
+ * the metadata listing is unavailable.
+ *
+ * @param {string} text
+ * @returns {{id:string, name:string, encodedName:string}[]}
+ */
+export function extractFileMarkers(text) {
+  if (typeof text !== 'string' || text === '') return [];
+  const out = [];
+  for (const line of text.split('\n')) {
+    const marker = parseFileMarker(line);
+    if (marker) out.push(marker);
+  }
+  return out;
+}
+
+/**
+ * resolveFileMarkerName(marker, cryptoKey) → display-safe filename.
+ *
+ * Plain markers return their decoded name immediately. Encrypted markers are
+ * decrypted locally when a key is available; otherwise the placeholder is
+ * returned instead of leaking ciphertext into the UI.
+ *
+ * @param {{name:string, encodedName:string}|null} marker
+ * @param {CryptoKey|null} cryptoKey
+ * @param {string} placeholder
+ * @returns {Promise<string>}
+ */
+export async function resolveFileMarkerName(marker, cryptoKey, placeholder = '(allegato cifrato)') {
+  if (!marker || typeof marker.name !== 'string') return placeholder;
+  if (!isEncryptedName(marker.encodedName)) return marker.name;
+  if (!cryptoKey) return placeholder;
+  try {
+    return await decryptName(cryptoKey, marker.encodedName);
+  } catch {
+    return placeholder;
+  }
 }
 
 /**

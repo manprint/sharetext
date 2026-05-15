@@ -136,6 +136,7 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 
 - Dalla landing, ogni nuova sessione genera una chiave AES-256-GCM nel browser del creator. La chiave viene appesa al URL dopo `#` (es. `https://host/s/abc-xyz#k=…`). I browser **non** inviano il fragment al server in nessuna richiesta HTTP, quindi il server vede solo ciphertext.
 - Il contenuto testuale viene serializzato come `enc:v1:<iv-b64url>:<ciphertext-b64url>`. I file vengono cifrati come bytes (IV prepended, payload binario). Il nome file viene cifrato separatamente in formato `<iv>.<ct>` e va a riempire il marker `[file:<id>:<name-cifrato>]`.
+- Quando il fragment `#k=…` e il marker `[file:...]` sono presenti, il client puo' ricostruire localmente il nome dell'allegato anche se il listing metadata `GET /api/sessions/{slug}/files` non e' disponibile in quel momento. Il placeholder `(allegato cifrato)` resta solo come fallback per chiave assente o decifratura fallita.
 - Aprire la sessione **senza** il fragment `#k=…` la mette in modalità "sola lettura cifrata": banner di avviso, editor read-only, niente render del ciphertext grezzo.
 - Sessioni create **prima** dell'introduzione restano plaintext: nessuna migrazione automatica (impossibile senza chiave). Per cifrare contenuti vecchi: creare una nuova sessione e fare copy/paste manuale.
 - **Threat model**: la cifratura protegge da dump del DB, snapshot del disco VPS, accesso operatore al filesystem o al backup. **Non** protegge se l'operatore può sostituire `app.js` con codice malevolo (limite intrinseco di tutti gli E2E in web app), né da chi riceve il link completo.
@@ -167,7 +168,6 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 | `CLEANUP_INTERVAL` | `30s` | Frequenza sweep cancellazione sessioni scadute + allegati orfani |
 | `REQUEST_TIMEOUT` | `30s` | Timeout middleware per le richieste HTTP |
 | `VACUUM_INTERVAL` | `0s` (off) | Frequenza `VACUUM` SQLite + `wal_checkpoint(TRUNCATE)` per reclaim spazio. `0` o vuoto = disabilitato. |
-| `FILE_GRACE` | `60s` | Finestra di grazia per upload appena fatti (evita race su marker) |
 | `LOCK_TTL` | `15s` | TTL del lock di modifica editor. Un client che detiene il lock deve inviare un heartbeat entro questo intervallo, altrimenti il server libera il lock e un altro utente puo' acquisirlo. Minimo accettato: `1s`. |
 | `LOCK_IDLE_RELEASE` | `3s` | Tempo di inattività dopo cui il client che detiene il lock lo rilascia spontaneamente, così che un altro utente possa prendere il turno. Il valore viene servito al browser via attributo `data-idle-release` su `<body>`. Minimo accettato: `1s`; valori più piccoli vengono ignorati e si ricade sul default. |
 | `WS_READ_TIMEOUT` | `90s` | Tempo massimo che il server attende un nuovo frame WebSocket prima di chiudere la connessione. Difende da slow-loris-like su connessioni upgraded: una connessione idle senza heartbeat o input viene chiusa quando il timeout scatta. Minimo accettato: `1s`. Tipicamente non serve toccarlo: i client `app.js` inviano heartbeat ogni `LOCK_TTL/2`, ben sotto il default. |
@@ -735,19 +735,17 @@ environment:
 La goroutine `runCleanup` esegue a ogni tick (`CLEANUP_INTERVAL`):
 
 1. **Sessioni scadute** — `DELETE FROM sessions WHERE expires_at <= now()`. I file collegati vengono cascade-deleted via FK.
-2. **`DeleteOrphanFiles(grace)`**:
+2. **`DeleteOrphanFiles()`**:
   - **Safety net**: rimuove righe `files` con `session_slug` non più presente in `sessions` (eseguito anche se FK fossero disabilitate, per resilienza in caso di DB incoerente).
-  - **Per-sessione**: usa la tabella derivata `file_refs`, sincronizzata a ogni `PUT`, per eliminare i file della sessione che non risultano piu' referenziati *e* il cui `created_at <= now() - FILE_GRACE`.
-  - **Filesystem**: se `FILE_STORAGE_BACKEND=fs`, rimuove anche i payload orfani e le directory sessione rimaste vuote.
+  - **Filesystem**: se `FILE_STORAGE_BACKEND=fs`, rimuove anche le directory sessione rimaste orfane.
 
-`FILE_GRACE` (default 60s) protegge gli upload appena fatti il cui marker non è ancora stato propagato via WS/PUT, evitando di cancellare un file che sta per essere referenziato.
+Gli allegati di una sessione attiva non vengono più ripuliti separatamente: un upload andato a buon fine resta disponibile fino alla hard-delete della sessione stessa.
 
 Garanzie complessive:
 
 - Sessione persistente eliminata via admin → file cascade-deleted.
 - Sessione temporanea scaduta → sweep DELETE + cascade.
-- Marker rimosso dal testo (utente cancella la riga) → dopo `FILE_GRACE` dal momento dell'upload, prossimo tick elimina il file.
-- Upload appena fatto con marker non ancora committed → protetto da grace.
+- Sessione attiva, persistente o temporanea non ancora scaduta → ogni upload riuscito resta disponibile anche se il marker viene rimosso dal testo.
 
 ---
 

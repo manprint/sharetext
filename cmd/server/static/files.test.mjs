@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseFileMarker, buildFileMarker, buildFileMarkerRaw, formatBytes, insertMarkersAtPosition, extractMarkerIds } from './files.js';
+import { generateKey, encryptName } from './crypto.js';
+import {
+  parseFileMarker,
+  buildFileMarker,
+  buildFileMarkerRaw,
+  formatBytes,
+  insertMarkersAtPosition,
+  extractMarkerIds,
+  extractFileMarkers,
+  resolveFileMarkerName,
+} from './files.js';
 
 test('parseFileMarker: valid plain', () => {
   assert.deepEqual(parseFileMarker('[file:abc123:notes.txt]'),
@@ -169,4 +179,40 @@ test('extractMarkerIds: non-string input → empty set, no throw', () => {
   assert.equal(extractMarkerIds(null).size, 0);
   assert.equal(extractMarkerIds(undefined).size, 0);
   assert.equal(extractMarkerIds(42).size, 0);
+});
+
+test('extractFileMarkers: returns only whole-line markers in order', () => {
+  const text = [
+    'hello',
+    '[file:a:first.txt]',
+    'not [file:inline:nope] inline',
+    '  [file:b:second.txt]  ',
+  ].join('\n');
+  assert.deepEqual(extractFileMarkers(text), [
+    { id: 'a', name: 'first.txt', encodedName: 'first.txt' },
+    { id: 'b', name: 'second.txt', encodedName: 'second.txt' },
+  ]);
+});
+
+test('resolveFileMarkerName: plain marker returns decoded name', async () => {
+  const marker = parseFileMarker('[file:a:my%20notes.txt]');
+  assert.equal(await resolveFileMarkerName(marker, null), 'my notes.txt');
+});
+
+test('resolveFileMarkerName: encrypted marker decrypts with key', async () => {
+  const key = await generateKey();
+  const enc = await encryptName(key, 'secret report.pdf');
+  const marker = parseFileMarker(`[file:a:${enc}]`);
+  assert.equal(await resolveFileMarkerName(marker, key), 'secret report.pdf');
+});
+
+test('resolveFileMarkerName: encrypted marker without key stays placeholder', async () => {
+  const marker = parseFileMarker('[file:a:abcDEF_123.AaBbCc_123]');
+  assert.equal(await resolveFileMarkerName(marker, null), '(allegato cifrato)');
+});
+
+test('resolveFileMarkerName: decrypt failure stays placeholder', async () => {
+  const key = await generateKey();
+  const marker = parseFileMarker('[file:a:not-a-real-payload.AaBb]');
+  assert.equal(await resolveFileMarkerName(marker, key), '(allegato cifrato)');
 });
