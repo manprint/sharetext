@@ -19,6 +19,7 @@ type appConfig struct {
 	VacuumInterval          time.Duration
 	LockTTL                 time.Duration
 	LockIdleRelease         time.Duration
+	WSReadTimeout           time.Duration
 	MaxFileSize             int64
 	MaxContentSize          int64
 	MaxFilesPerSession      int
@@ -37,6 +38,10 @@ type appConfig struct {
 	AdminRateLimitRPS       float64
 	AdminRateLimitBurst     int
 	AdminRateLimitTTL       time.Duration
+	CreateRateLimitEnabled  bool
+	CreateRateLimitRPS      float64
+	CreateRateLimitBurst    int
+	CreateRateLimitTTL      time.Duration
 	ReadHeaderTimeout       time.Duration
 	WriteTimeout            time.Duration
 	IdleTimeout             time.Duration
@@ -66,6 +71,7 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		VacuumInterval:          durationEnv(getenv, "VACUUM_INTERVAL", 0, 0),
 		LockTTL:                 durationEnv(getenv, "LOCK_TTL", handlers.DefaultLockTTL, time.Second),
 		LockIdleRelease:         durationEnv(getenv, "LOCK_IDLE_RELEASE", 3*time.Second, time.Second),
+		WSReadTimeout:           durationEnv(getenv, "WS_READ_TIMEOUT", 90*time.Second, time.Second),
 		MaxFileSize:             int64Env(getenv, "MAX_FILE_SIZE", handlers.MaxFileSize),
 		MaxContentSize:          int64Env(getenv, "MAX_CONTENT_SIZE", handlers.MaxContentSize),
 		MaxFilesPerSession:      intEnv(getenv, "MAX_FILES_PER_SESSION", 256),
@@ -84,6 +90,10 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		AdminRateLimitRPS:       floatEnv(getenv, "ADMIN_RATE_LIMIT_RPS", 5),
 		AdminRateLimitBurst:     intEnv(getenv, "ADMIN_RATE_LIMIT_BURST", 15),
 		AdminRateLimitTTL:       durationEnv(getenv, "ADMIN_RATE_LIMIT_TTL", 10*time.Minute, 10*time.Minute),
+		CreateRateLimitEnabled:  boolEnv(getenv, "CREATE_RATE_LIMIT_ENABLED", true),
+		CreateRateLimitRPS:      floatEnv(getenv, "CREATE_RATE_LIMIT_RPS", 1),
+		CreateRateLimitBurst:    intEnv(getenv, "CREATE_RATE_LIMIT_BURST", 5),
+		CreateRateLimitTTL:      durationEnv(getenv, "CREATE_RATE_LIMIT_TTL", 10*time.Minute, 10*time.Minute),
 		ReadHeaderTimeout:       durationEnv(getenv, "READ_HEADER_TIMEOUT", 5*time.Second, 5*time.Second),
 		WriteTimeout:            durationEnv(getenv, "WRITE_TIMEOUT", 30*time.Second, 30*time.Second),
 		IdleTimeout:             durationEnv(getenv, "IDLE_TIMEOUT", 2*time.Minute, 2*time.Minute),

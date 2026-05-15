@@ -425,6 +425,34 @@ func TestWSAllowsConfiguredOrigin(t *testing.T) {
 	defer c.CloseNow()
 }
 
+func TestWSReadTimeoutClosesIdleConnection(t *testing.T) {
+	srv, api := newWSServer(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "idlews"}); err != nil {
+		t.Fatal(err)
+	}
+	old := WSReadTimeout
+	WSReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { WSReadTimeout = old })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "idlews"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	// Consume the initial snapshot, then wait silently. The server must close
+	// the connection once WSReadTimeout elapses without a client frame.
+	readJSON(t, ctx, c)
+	start := time.Now()
+	if _, _, err := c.Read(ctx); err == nil {
+		t.Fatal("expected read to fail once server-side read deadline fires")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("read deadline took too long to fire: %s", elapsed)
+	}
+}
+
 func TestWSRejectsOversizedMessage(t *testing.T) {
 	srv, api := newWSServer(t)
 	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "bigws"}); err != nil {

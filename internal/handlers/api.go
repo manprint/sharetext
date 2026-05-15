@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -157,11 +158,12 @@ func (a *API) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	var body updateReq
 	if err := decodeJSONBody(w, r, &body, MaxContentSize+1024); err != nil {
-		status := http.StatusBadRequest
 		if errors.Is(err, errBodyTooLarge) {
-			status = http.StatusRequestEntityTooLarge
+			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+			return
 		}
-		http.Error(w, err.Error(), status)
+		log.Printf("api: decode update body for slug %q: %v", slug, err)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if MaxContentSize > 0 && int64(len(body.Content)) > MaxContentSize {

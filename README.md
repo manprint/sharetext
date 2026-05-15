@@ -94,7 +94,9 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 - **Admin password con hash bcrypt** (`ADMIN_PASS_HASH`), preferito sul plaintext `ADMIN_PASS`.
 - **`PRAGMA secure_delete=ON`** per evitare residui leggibili nelle pagine libere SQLite.
 - **CSP stretta** di default (no `'unsafe-inline'` su `script-src`), `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Permissions-Policy` minimale. Link nel testo emessi con `rel="noopener noreferrer"` per non leakare il fragment.
-- **Rate limit** per-IP separato per route pubblici e admin.
+- **Rate limit** per-IP separato per route pubblici, admin e creazione sessioni (`POST /api/sessions`, bucket dedicato più stretto contro flood).
+- **WebSocket read deadline** (`WS_READ_TIMEOUT`, default `90s`) chiude le connessioni idle e protegge da slow-loris su upgrade.
+- **Bcrypt admin hash validato a startup**: hash malformato → fail-fast, niente silent disable.
 
 **PWA**
 
@@ -168,6 +170,7 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 | `FILE_GRACE` | `60s` | Finestra di grazia per upload appena fatti (evita race su marker) |
 | `LOCK_TTL` | `15s` | TTL del lock di modifica editor. Un client che detiene il lock deve inviare un heartbeat entro questo intervallo, altrimenti il server libera il lock e un altro utente puo' acquisirlo. Minimo accettato: `1s`. |
 | `LOCK_IDLE_RELEASE` | `3s` | Tempo di inattività dopo cui il client che detiene il lock lo rilascia spontaneamente, così che un altro utente possa prendere il turno. Il valore viene servito al browser via attributo `data-idle-release` su `<body>`. Minimo accettato: `1s`; valori più piccoli vengono ignorati e si ricade sul default. |
+| `WS_READ_TIMEOUT` | `90s` | Tempo massimo che il server attende un nuovo frame WebSocket prima di chiudere la connessione. Difende da slow-loris-like su connessioni upgraded: una connessione idle senza heartbeat o input viene chiusa quando il timeout scatta. Minimo accettato: `1s`. Tipicamente non serve toccarlo: i client `app.js` inviano heartbeat ogni `LOCK_TTL/2`, ben sotto il default. |
 | `MAX_FILE_SIZE` | `10485760` | Limite massimo upload per singolo file in byte. Default 10 MiB. |
 | `MAX_CONTENT_SIZE` | `6291456` | Limite massimo del contenuto testuale di sessione in byte. Vale per `PUT` e WebSocket. Il default (6 MiB) lascia spazio all'inflazione ~34% del ciphertext AES-GCM base64, mantenendo la capacità plaintext effettiva attorno ai 4 MiB. |
 | `MAX_FILES_PER_SESSION` | `256` | Numero massimo di allegati per sessione. `0` disabilita il limite. |
@@ -181,6 +184,10 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 | `ADMIN_RATE_LIMIT_RPS` | `5` | Token/sec del rate limit admin. |
 | `ADMIN_RATE_LIMIT_BURST` | `15` | Burst massimo del rate limit admin. |
 | `ADMIN_RATE_LIMIT_TTL` | `10m` | TTL degli entry IP del rate limiter admin. |
+| `CREATE_RATE_LIMIT_ENABLED` | `true` | Abilita il rate limiter dedicato a `POST /api/sessions` (in aggiunta al rate limiter pubblico). Difende dal flood di creazione sessioni che riempirebbe rapidamente il volume DB. Si disattiva automaticamente anche se `RATE_LIMIT_ENABLED=false`. |
+| `CREATE_RATE_LIMIT_RPS` | `1` | Token/sec del rate limit dedicato a `POST /api/sessions`. |
+| `CREATE_RATE_LIMIT_BURST` | `5` | Burst massimo del rate limit di creazione sessioni: un IP può creare 5 sessioni in rapida successione, poi è capped a 1/s. |
+| `CREATE_RATE_LIMIT_TTL` | `10m` | TTL degli entry IP del rate limiter di creazione. |
 | `READ_HEADER_TIMEOUT` | `5s` | Timeout di lettura degli header HTTP. |
 | `WRITE_TIMEOUT` | `30s` | Timeout di scrittura della risposta HTTP. |
 | `IDLE_TIMEOUT` | `2m` | Timeout keep-alive HTTP. |
@@ -806,11 +813,13 @@ just test-all       # Go + JS
 just test           # solo Go
 just test-race      # Go con -race
 just test-js        # solo JS (node:test)
+just vuln           # scansiona dipendenze con govulncheck (installa on-demand)
+just vet            # go vet
 ```
 
 ### Go
 
-- `cmd/server` (config loader): override env, fallback su valori invalidi, default `LOCK_TTL` / `LOCK_IDLE_RELEASE` (con rifiuto valori sotto 1s).
+- `cmd/server` (config loader): override env, fallback su valori invalidi, default `LOCK_TTL` / `LOCK_IDLE_RELEASE` / `WS_READ_TIMEOUT` (con rifiuto valori sotto 1s), defaults e override del bucket `CREATE_RATE_LIMIT_*`.
 - `internal/session`:
   - `NewSlug` (length, alfabeto, unicità su 1000 iterazioni);
   - `ValidName` (regex, edge case lunghezza, accenti, caratteri proibiti);
@@ -827,9 +836,9 @@ just test-js        # solo JS (node:test)
 - `internal/handlers`:
   - API sessioni (httptest): persistent/temporary validi e invalidi (400), 410 su scaduta su GET e PUT;
   - hub broadcast / except / leave;
-  - WebSocket end-to-end con 2 client + slug inesistente + origin foreign rifiutato (403) + same-host accettato (101);
+  - WebSocket end-to-end con 2 client + slug inesistente + origin foreign rifiutato (403) + same-host accettato (101) + read deadline che chiude la connessione idle (`WS_READ_TIMEOUT`);
   - admin: missing/wrong creds (401), creds vuote (503), list (200 con esclusione scaduti, total_size con files), delete (200 + 404 idempotenza), delete unauthorized; branch bcrypt (`ADMIN_PASS_HASH`) valido e invalido, timing-safe;
-  - middleware: HSTS applicato su `X-Forwarded-Proto: https`;
+  - middleware: HSTS applicato su `X-Forwarded-Proto: https`; rate limiter blocca burst per-IP, scenario dedicato `POST /api/sessions` (`CREATE_RATE_LIMIT_*`) per resistenza al flood;
   - file: upload happy/missing/unknown/oversize (413), download (binary + Content-Disposition), list, bundle ZIP (verificato letto via `archive/zip`, dedup nomi duplicati);
   - lock: acquire/release/heartbeat, denial cross-client, auto-release su disconnect.
 

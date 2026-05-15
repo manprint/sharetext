@@ -60,6 +60,11 @@ test-all: test test-js
 vet:
     go vet ./...
 
+# Scan dependencies for known CVEs using govulncheck (installs on-demand).
+vuln:
+    @command -v govulncheck >/dev/null || go install golang.org/x/vuln/cmd/govulncheck@latest
+    govulncheck ./...
+
 # Format code
 fmt:
     gofmt -w .

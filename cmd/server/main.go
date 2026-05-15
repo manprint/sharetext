@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"golang.org/x/crypto/bcrypt"
 
 	"sharetext/internal/handlers"
 	"sharetext/internal/store"
@@ -44,8 +45,17 @@ type pageData struct {
 
 func main() {
 	cfg := loadConfigFromEnv(os.Getenv)
+	if cfg.AdminPassHash != "" {
+		// Fail fast if ADMIN_PASS_HASH is not a valid bcrypt encoding (typo,
+		// truncated copy/paste, wrong algorithm). Without this every login
+		// silently returns 401 and the operator only finds out by trying.
+		if _, err := bcrypt.Cost([]byte(cfg.AdminPassHash)); err != nil {
+			log.Fatalf("ADMIN_PASS_HASH is not a valid bcrypt hash: %v", err)
+		}
+	}
 	handlers.MaxFileSize = cfg.MaxFileSize
 	handlers.MaxContentSize = cfg.MaxContentSize
+	handlers.WSReadTimeout = cfg.WSReadTimeout
 	metrics := telemetry.NewMetrics(cfg.MetricsEnabled)
 
 	st, err := store.OpenWithOptions(cfg.DBPath, cfg.storeOptions())
@@ -110,6 +120,15 @@ func main() {
 		Burst:             cfg.AdminRateLimitBurst,
 		EntryTTL:          cfg.AdminRateLimitTTL,
 	})
+	// Session creation is the most expensive public endpoint (allocates a DB
+	// row and a slug). Limit it tighter than the generic public bucket to keep
+	// a single IP from filling storage with thousands of throwaway sessions.
+	createRateLimit := handlers.NewIPRateLimiter(handlers.RateLimitConfig{
+		Enabled:           cfg.RateLimitEnabled && cfg.CreateRateLimitEnabled,
+		RequestsPerSecond: cfg.CreateRateLimitRPS,
+		Burst:             cfg.CreateRateLimitBurst,
+		EntryTTL:          cfg.CreateRateLimitTTL,
+	})
 	requestTimeout := middleware.Timeout(cfg.RequestTimeout)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
@@ -152,7 +171,7 @@ func main() {
 		})
 		g.Group(func(apiRoutes chi.Router) {
 			apiRoutes.Use(requestTimeout)
-			apiRoutes.Post("/api/sessions", api.CreateSession)
+			apiRoutes.With(createRateLimit).Post("/api/sessions", api.CreateSession)
 			apiRoutes.Get("/api/sessions/{slug}", api.GetSession)
 			apiRoutes.Put("/api/sessions/{slug}", api.UpdateSession)
 			apiRoutes.Post("/api/sessions/{slug}/files", api.UploadFile)

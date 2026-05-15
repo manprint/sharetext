@@ -26,6 +26,10 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		"AUDIT_LOG_DEFAULT_LIMIT":   "75",
 		"LOCK_TTL":                  "25s",
 		"LOCK_IDLE_RELEASE":         "7s",
+		"WS_READ_TIMEOUT":           "45s",
+		"CREATE_RATE_LIMIT_RPS":     "2",
+		"CREATE_RATE_LIMIT_BURST":   "10",
+		"CREATE_RATE_LIMIT_TTL":     "15m",
 	}
 	cfg := loadConfigFromEnv(func(key string) string { return env[key] })
 	if cfg.LockTTL != 25*time.Second {
@@ -33,6 +37,15 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	}
 	if cfg.LockIdleRelease != 7*time.Second {
 		t.Fatalf("expected LOCK_IDLE_RELEASE=7s, got %s", cfg.LockIdleRelease)
+	}
+	if cfg.WSReadTimeout != 45*time.Second {
+		t.Fatalf("expected WS_READ_TIMEOUT=45s, got %s", cfg.WSReadTimeout)
+	}
+	if cfg.CreateRateLimitRPS != 2 || cfg.CreateRateLimitBurst != 10 || cfg.CreateRateLimitTTL != 15*time.Minute {
+		t.Fatalf("unexpected CREATE rate limit config: %+v", cfg)
+	}
+	if !cfg.CreateRateLimitEnabled {
+		t.Fatal("expected CreateRateLimitEnabled default true")
 	}
 	if cfg.Port != "9090" || cfg.DBPath != "/tmp/sharetext.db" {
 		t.Fatalf("unexpected basic config: %+v", cfg)
@@ -81,6 +94,12 @@ func TestLoadConfigFromEnvFallsBackOnInvalidValues(t *testing.T) {
 	}
 	if cfg.LockIdleRelease != 3*time.Second {
 		t.Fatalf("expected LOCK_IDLE_RELEASE default 3s, got %s", cfg.LockIdleRelease)
+	}
+	if cfg.WSReadTimeout != 90*time.Second {
+		t.Fatalf("expected WS_READ_TIMEOUT default 90s, got %s", cfg.WSReadTimeout)
+	}
+	if cfg.CreateRateLimitRPS != 1 || cfg.CreateRateLimitBurst != 5 {
+		t.Fatalf("expected CREATE rate limit defaults rps=1 burst=5, got rps=%v burst=%d", cfg.CreateRateLimitRPS, cfg.CreateRateLimitBurst)
 	}
 }
 
