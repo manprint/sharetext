@@ -1,5 +1,456 @@
 # sharetext
 
+sharetext e' una web app self-hosted per condividere testo e allegati in tempo reale.
+Funziona con un unico binario Go, salva i dati in SQLite ed e' pensata per un deploy semplice ma robusto: PWA installabile, supporto mobile, sessioni persistenti o temporanee, allegati che seguono il ciclo di vita della sessione e cifratura end-to-end opzionale.
+
+Per dettagli architetturali, protocollo WebSocket, struttura del codice e note di sviluppo, vedi `readme_tecnical.md`.
+
+## Indice
+
+- [Descrizione dell'applicazione](#descrizione-dellapplicazione)
+- [Funzionalita'](#funzionalita)
+- [Focus sulla sicurezza](#focus-sulla-sicurezza)
+- [Deploy con Docker](#deploy-con-docker)
+- [Deploy con binario standalone](#deploy-con-binario-standalone)
+- [Variabili di ambiente](#variabili-di-ambiente)
+- [Info d'uso](#info-duso)
+- [Pinning delle sessioni](#pinning-delle-sessioni)
+- [Altre note](#altre-note)
+
+## Descrizione dell'applicazione
+
+sharetext serve a condividere rapidamente contenuti testuali e file tra piu' persone tramite un link.
+
+L'app offre due modalita' di sessione:
+
+- Sessione persistente: resta disponibile finche' non viene eliminata dall'admin.
+- Sessione temporanea: scade dopo il tempo scelto e viene distrutta in modo definitivo.
+
+Ogni sessione puo' contenere:
+
+- testo libero nell'editor;
+- allegati caricati via upload o drag and drop;
+- righe speciali per copiare/scaricare facilmente singole porzioni di contenuto;
+- cifratura end-to-end opzionale tramite chiave nel fragment `#k=...` dell'URL.
+
+La filosofia del progetto e' semplice:
+
+- installazione facile;
+- dipendenze operative minime;
+- interfaccia pulita e veloce;
+- comportamento prevedibile in produzione.
+
+## Funzionalita'
+
+### Sessioni
+
+- Creazione di sessioni persistenti con nome leggibile.
+- Creazione di sessioni temporanee con durata configurabile.
+- Link diretto alla sessione condivisibile.
+- Countdown visibile per le sessioni temporanee.
+
+### Editing realtime
+
+- Sincronizzazione in tempo reale via WebSocket.
+- Un solo editor attivo per volta: il lock di modifica evita conflitti di scrittura.
+- Gli altri utenti possono continuare a leggere, copiare e scaricare mentre qualcuno sta scrivendo.
+
+### Testo e produttivita'
+
+- Copia di tutto il contenuto.
+- Copia o download di singole righe.
+- Blocchi multi-riga delimitati da `-----`.
+- Slash command disponibili direttamente nell'editor:
+  - `/timestamp`
+  - `/upload`
+
+### Allegati
+
+- Upload manuale da bottone.
+- Drag and drop nell'editor.
+- Download singolo allegato.
+- Download bundle ZIP di testo + allegati.
+- Gli allegati caricati con successo seguono il ciclo di vita della sessione:
+  - sessione temporanea: vivono fino alla scadenza;
+  - sessione persistente: vivono fino alla cancellazione admin della sessione.
+
+### Mobile e PWA
+
+- Interfaccia responsive per desktop e mobile.
+- PWA installabile sulla schermata Home.
+- Offline in sola lettura con cache della shell applicativa.
+- Pinning di singole sessioni su mobile/home screen.
+
+### Amministrazione
+
+- Pannello `/admin` protetto da Basic Auth.
+- Lista sessioni attive.
+- Eliminazione hard delete delle sessioni.
+- Audit log e metriche operative.
+
+## Focus sulla sicurezza
+
+### Cifratura end-to-end
+
+Per le nuove sessioni la chiave viene generata nel browser e appesa all'URL dopo `#`, ad esempio:
+
+```text
+https://host/s/sessione-abc#k=...
+```
+
+La parte dopo `#` non viene inviata al server nelle richieste HTTP.
+
+Conseguenze pratiche:
+
+- il server salva ciphertext e non la chiave;
+- chi possiede il link completo puo' leggere la sessione;
+- se apri la sessione senza `#k=...`, la sessione cifrata entra in modalita' bloccata/sola lettura.
+
+### Hardening applicativo
+
+- Header di sicurezza attivabili via env.
+- WebSocket limitato allo stesso origin per default.
+- Password admin con supporto a bcrypt (`ADMIN_PASS_HASH`).
+- Rate limiting separato per traffico pubblico, creazione sessioni e admin.
+- `secure_delete` SQLite attivo per default.
+- Allegati cancellati insieme alla sessione via foreign key cascade.
+
+### Limiti da conoscere
+
+- La cifratura end-to-end non protegge se il server serve JavaScript malevolo.
+- Il link completo e' sensibile: se lo condividi, stai condividendo anche l'accesso.
+- Se usi pinning di una sessione cifrata, la chiave resta memorizzata localmente sul dispositivo che l'ha aperta.
+
+### Raccomandazioni minime per produzione
+
+- usa HTTPS;
+- cambia sempre le credenziali admin di default;
+- preferisci `ADMIN_PASS_HASH` a `ADMIN_PASS`;
+- monta `/data` su storage persistente;
+- fai backup regolari del DB e degli allegati se usi backend `fs`.
+
+## Deploy con Docker
+
+Il repository include gia' un `compose.yaml` pronto all'uso.
+
+### Avvio rapido
+
+```bash
+docker compose up -d
+```
+
+Oppure con le ricette del progetto:
+
+```bash
+just up
+just smoke
+```
+
+### Cosa monta il compose
+
+- espone la porta `8080`;
+- usa `/data/sharetext.db` come database SQLite;
+- monta un volume persistente su `/data`.
+
+### Esempio operativo minimo
+
+```yaml
+services:
+  sharetext:
+    image: ghcr.io/manprint/sharetext:latest
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DB_PATH: /data/sharetext.db
+      VACUUM_INTERVAL: "5m"
+      ADMIN_USER: "admin"
+      ADMIN_PASS_HASH: "$2a$12$..."
+    volumes:
+      - sharetext-data:/data
+    restart: unless-stopped
+
+volumes:
+  sharetext-data:
+```
+
+### Note pratiche
+
+- Se usi `FILE_STORAGE_BACKEND=fs`, conserva anche `FILE_STORAGE_DIR` nello stesso volume persistente.
+- Se metti l'app dietro Nginx, Traefik o Caddy, passa HTTPS e `X-Forwarded-Proto` correttamente.
+- Il `compose.yaml` del repository e' comodo per partire, ma in produzione devi rivedere almeno credenziali admin, policy TLS e limiti operativi.
+
+## Deploy con binario standalone
+
+Se preferisci non usare Docker, l'app gira come singolo binario Go.
+
+### Build
+
+```bash
+go build -o sharetext ./cmd/server
+```
+
+Oppure:
+
+```bash
+just build
+```
+
+### Avvio manuale
+
+```bash
+PORT=8080 \
+DB_PATH=/srv/sharetext/sharetext.db \
+ADMIN_USER=admin \
+ADMIN_PASS_HASH='$2a$12$...' \
+./sharetext
+```
+
+### Esempio systemd
+
+```ini
+[Unit]
+Description=sharetext
+After=network.target
+
+[Service]
+User=sharetext
+Group=sharetext
+WorkingDirectory=/srv/sharetext
+EnvironmentFile=/etc/sharetext/sharetext.env
+ExecStart=/srv/sharetext/sharetext
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Esempio `/etc/sharetext/sharetext.env`:
+
+```bash
+PORT=8080
+DB_PATH=/srv/sharetext/data/sharetext.db
+VACUUM_INTERVAL=5m
+ADMIN_USER=admin
+ADMIN_PASS_HASH=$2a$12$...
+```
+
+### Raccomandazioni standalone
+
+- crea un utente di sistema dedicato;
+- usa una directory dati persistente e con permessi corretti;
+- metti il servizio dietro un reverse proxy HTTPS;
+- monitora lo spazio disco, specialmente se usi SQLite BLOB o backend file.
+
+## Variabili di ambiente
+
+### Come leggere i valori
+
+- Le durate usano il formato Go: `30s`, `5m`, `1h`, `24h`.
+- I booleani accettano tipicamente `true/false`, `1/0`, `yes/no`, `on/off`.
+- Se un valore e' invalido o sotto il minimo previsto, l'app usa il default.
+- In Docker Compose puoi sovrascrivere i default con `${VAR:-default}` oppure con un file `.env`.
+
+### Core runtime
+
+| Variabile | Default | Cosa fa | Impatto operativo |
+|-----------|---------|---------|-------------------|
+| `PORT` | `8080` | Porta HTTP del servizio. | Cambiala se hai un reverse proxy o piu' servizi sulla stessa macchina. |
+| `DB_PATH` | `sharetext.db` | Percorso del file SQLite. | Deve stare su storage persistente se vuoi mantenere i dati. |
+| `SLUG_LEN` | `16` | Lunghezza della parte random dello slug. | Valori piu' alti rendono gli URL piu' lunghi ma piu' difficili da indovinare. |
+| `CLEANUP_INTERVAL` | `30s` | Frequenza del cleanup delle sessioni scadute e del safety-net file. | Più basso = scadenze applicate prima; più alto = meno sweep ma cleanup meno tempestivo. |
+| `REQUEST_TIMEOUT` | `30s` | Timeout middleware per le richieste HTTP normali. | Se troppo basso puo' troncare richieste lente dietro proxy o storage lento. |
+| `VACUUM_INTERVAL` | `0s` | Frequenza di `VACUUM` + checkpoint WAL. `0` = disabilitato. | Utile per recuperare spazio disco; durante il vacuum le scritture restano bloccate per la durata dell'operazione. |
+
+### Lock, websocket e comportamento editor
+
+| Variabile | Default | Cosa fa | Impatto operativo |
+|-----------|---------|---------|-------------------|
+| `LOCK_TTL` | `15s` | Durata massima del lock editor senza heartbeat. | Se troppo basso, i tab mobile/background possono perdere il lock troppo facilmente. |
+| `LOCK_IDLE_RELEASE` | `3s` | Tempo di inattivita' oltre il quale il client rilascia spontaneamente il lock. | Se lo alzi, chi smette di scrivere tiene il lock più a lungo. |
+| `WS_READ_TIMEOUT` | `90s` | Timeout massimo di lettura per la WebSocket. | Protegge da connessioni idle o slow-loris; non abbassarlo troppo. |
+
+### Limiti contenuto e allegati
+
+| Variabile | Default | Cosa fa | Impatto operativo |
+|-----------|---------|---------|-------------------|
+| `MAX_FILE_SIZE` | `10485760` | Limite massimo per singolo file uploadato. | Oltre questo valore l'upload fallisce con `413`. |
+| `MAX_CONTENT_SIZE` | `6291456` | Limite massimo del contenuto testuale della sessione. | Vale su `PUT` e WebSocket. In sessioni cifrate considera l'overhead del ciphertext. |
+| `MAX_FILES_PER_SESSION` | `256` | Numero massimo di allegati per sessione. | `0` disabilita il limite. |
+| `MAX_SESSION_STORAGE_BYTES` | `104857600` | Quota totale sessione: testo + allegati. | `0` disabilita il limite; utile per evitare che una singola sessione saturi il nodo. |
+
+### Storage allegati e DB
+
+| Variabile | Default | Cosa fa | Impatto operativo |
+|-----------|---------|---------|-------------------|
+| `FILE_STORAGE_BACKEND` | `db` | Backend allegati: SQLite BLOB o filesystem (`fs`). | `db` e' più semplice; `fs` alleggerisce il DB ma richiede backup coerenti della directory file. |
+| `FILE_STORAGE_DIR` | `dirname(DB_PATH)/sharetext-files` | Directory usata solo con backend `fs`. | Se usi `fs`, deve essere persistente e scrivibile dal processo. |
+| `SECURE_DELETE` | `true` | Attiva `PRAGMA secure_delete=ON`. | Migliora la cancellazione sicura ma puo' avere un costo minimo in I/O. |
+
+### Rate limiting
+
+| Variabile | Default | Cosa fa | Impatto operativo |
+|-----------|---------|---------|-------------------|
+| `RATE_LIMIT_ENABLED` | `true` | Abilita rate limit pubblico e admin. | Se lo disattivi perdi una protezione importante contro abusi. |
+| `RATE_LIMIT_RPS` | `20` | Token al secondo per traffico pubblico. | Riducilo se vuoi un profilo più conservativo. |
+| `RATE_LIMIT_BURST` | `60` | Burst massimo sul rate limit pubblico. | Più alto = maggiore tolleranza ai picchi brevi. |
+| `RATE_LIMIT_TTL` | `10m` | TTL bucket IP pubblici. | Influisce su quanto a lungo restano in memoria gli stati del limiter. |
+| `CREATE_RATE_LIMIT_ENABLED` | `true` | Rate limit dedicato alla creazione sessioni. | Protegge da flood di `POST /api/sessions`. |
+| `CREATE_RATE_LIMIT_RPS` | `1` | Token al secondo per la creazione sessioni. | Più basso = creazione più controllata. |
+| `CREATE_RATE_LIMIT_BURST` | `5` | Burst massimo per la creazione sessioni. | Controlla quante sessioni un IP puo' creare in rapida sequenza. |
+| `CREATE_RATE_LIMIT_TTL` | `10m` | TTL bucket IP creazione sessioni. | Come sopra, ma per il limiter dedicato. |
+| `ADMIN_RATE_LIMIT_RPS` | `5` | Token al secondo per i route admin. | Limita bruteforce e polling aggressivo sull'admin. |
+| `ADMIN_RATE_LIMIT_BURST` | `15` | Burst massimo admin. | Più alto = più tolleranza alle raffiche brevi di richieste admin. |
+| `ADMIN_RATE_LIMIT_TTL` | `10m` | TTL bucket IP admin. | Tiene traccia degli IP admin per il tempo indicato. |
+
+### Sicurezza HTTP e rete
+
+| Variabile | Default | Cosa fa | Impatto operativo |
+|-----------|---------|---------|-------------------|
+| `READ_HEADER_TIMEOUT` | `5s` | Timeout lettura header HTTP. | Protegge da client lenti o malevoli. |
+| `WRITE_TIMEOUT` | `30s` | Timeout di scrittura risposta. | Se troppo basso puo' tagliare risposte lente o download grandi su reti deboli. |
+| `IDLE_TIMEOUT` | `2m` | Timeout keep-alive HTTP. | Riduce il numero di connessioni aperte troppo a lungo. |
+| `MAX_HEADER_BYTES` | `1048576` | Dimensione massima header HTTP. | Protegge da header eccessivi o malevoli. |
+| `SECURITY_HEADERS_ENABLED` | `true` | Abilita CSP, HSTS e altri header di hardening. | In produzione va tenuto attivo salvo casi molto specifici. |
+| `CONTENT_SECURITY_POLICY` | default built-in | Header CSP completo. | Personalizzalo solo se sai quali risorse extra devi permettere. |
+| `FRAME_OPTIONS` | `DENY` | Header `X-Frame-Options`. | Evita il clickjacking in iframe. |
+| `REFERRER_POLICY` | `no-referrer` | Header `Referrer-Policy`. | Riduce leak di URL e contesto di navigazione. |
+| `PERMISSIONS_POLICY` | `camera=(), microphone=(), geolocation=()` | Header `Permissions-Policy`. | Limita API sensibili nel browser. |
+| `STRICT_TRANSPORT_SECURITY` | `max-age=31536000; includeSubDomains` | Header HSTS quando il traffico e' HTTPS. | Va usato dietro TLS corretto; stringa vuota per disabilitare. |
+| `ALLOWED_ORIGINS` | vuoto | Lista origin ammessi per il WebSocket. | Vuoto = solo stesso origin. Utile se il frontend e il backend stanno su host diversi. |
+
+### Admin, metriche e audit
+
+| Variabile | Default | Cosa fa | Impatto operativo |
+|-----------|---------|---------|-------------------|
+| `METRICS_ENABLED` | `true` | Attiva metriche operative in memoria. | Se disabilitate, l'endpoint admin metriche non espone dati significativi. |
+| `AUDIT_LOG_ENABLED` | `true` | Registra gli eventi admin persistenti. | Consigliato in produzione. |
+| `AUDIT_LOG_DEFAULT_LIMIT` | `50` | Limite default per l'audit log admin. | Più alto = più record restituiti di default. |
+| `ADMIN_USER` | vuoto | Username admin. | Se manca, l'admin e' disabilitato. |
+| `ADMIN_PASS` | vuoto | Password admin plaintext. | Usala solo se non vuoi o non puoi usare bcrypt. |
+| `ADMIN_PASS_HASH` | vuoto | Hash bcrypt della password admin. | Se presente, ha priorita' su `ADMIN_PASS` ed e' la scelta consigliata. |
+
+### Esempi pratici
+
+#### Profilo minimo sicuro dietro reverse proxy
+
+```bash
+PORT=8080
+DB_PATH=/data/sharetext.db
+VACUUM_INTERVAL=5m
+ADMIN_USER=admin
+ADMIN_PASS_HASH=$2a$12$...
+SECURITY_HEADERS_ENABLED=true
+```
+
+#### Allegati su filesystem
+
+```bash
+FILE_STORAGE_BACKEND=fs
+FILE_STORAGE_DIR=/data/sharetext-files
+```
+
+#### WebSocket da origin aggiuntivi
+
+```bash
+ALLOWED_ORIGINS=https://sharetext.example.com,https://app.example.com
+```
+
+## Info d'uso
+
+### Creazione sessione
+
+- Vai sulla home.
+- Scegli se creare una sessione persistente o temporanea.
+- Condividi il link generato con chi deve collaborare.
+
+### Regola importante sul link
+
+Se la sessione e' cifrata, devi condividere il link completo, inclusa la parte dopo `#k=`.
+
+Se manca quella parte:
+
+- il server vede comunque la sessione;
+- il browser non ha la chiave;
+- il contenuto cifrato non sara' leggibile in chiaro.
+
+### Scrittura collaborativa
+
+- Una persona scrive alla volta.
+- Il lock editor viene acquisito e rilasciato automaticamente.
+- Gli altri utenti possono leggere, copiare e scaricare anche mentre il lock e' occupato.
+
+### Allegati
+
+- Usa il bottone `Upload` o trascina i file nell'editor.
+- Gli allegati caricati con successo restano disponibili finche' esiste la sessione.
+- Nelle sessioni temporanee spariscono solo alla scadenza della sessione.
+- Nelle sessioni persistenti spariscono solo quando l'admin elimina la sessione.
+
+### Comandi rapidi
+
+- `/timestamp` inserisce data e ora corrente.
+- `/upload` apre il selettore file e inserisce i marker degli allegati nel punto corrente.
+
+### Offline
+
+- La PWA puo' aprirsi anche offline.
+- Quando offline l'app entra in sola lettura.
+- Per modificare testo o caricare allegati devi tornare online.
+
+### Admin
+
+- L'admin puo' vedere le sessioni attive.
+- L'admin puo' eliminare una sessione in modo definitivo.
+- L'eliminazione della sessione rimuove anche i suoi allegati.
+
+## Pinning delle sessioni
+
+sharetext supporta il pinning di singole sessioni sulla schermata Home.
+
+### Come funziona
+
+- La home dell'app ha un manifest generale.
+- La pagina di una sessione usa invece un manifest dedicato per quello slug.
+- L'icona creata apre un launcher `/launch/{slug}`.
+- Il launcher recupera in locale la chiave della sessione gia' vista su quel dispositivo e reindirizza a `/s/{slug}#k=...`.
+
+### Procedura consigliata
+
+1. Apri la sessione con il link completo, incluso `#k=...` se presente.
+2. Attendi il caricamento completo della pagina sessione.
+3. Usa la funzione del browser `Aggiungi alla schermata Home`.
+4. Apri l'icona creata per verificare che parta direttamente nella sessione corretta.
+
+### Cose da sapere
+
+- Il pinning e' per dispositivo.
+- La chiave non viene salvata sul server ma nello storage locale del browser/dispositivo.
+- Se cancelli i dati del sito, cambi profilo browser o reinstalli la PWA, potresti dover aprire di nuovo il link completo e ripinnare la sessione.
+- Se il launcher non trova la chiave locale, ti propone comunque l'apertura della sessione, ma senza poter ricostruire automaticamente il fragment segreto.
+
+## Altre note
+
+### Backup
+
+- Se usi `FILE_STORAGE_BACKEND=db`, il backup principale e' il file SQLite.
+- Se usi `FILE_STORAGE_BACKEND=fs`, devi salvare sia il DB sia la directory degli allegati.
+
+### Logging e monitoraggio
+
+- Abilita metriche e audit log in produzione.
+- Controlla periodicamente spazio disco, crescita del DB e volume allegati.
+
+### Credenziali admin
+
+Nel `compose.yaml` del repository l'admin puo' essere abilitato con valori di default comodi per sviluppo.
+Non usare quei valori in produzione.
+
+### Documento tecnico
+
+Per API, struttura del codice, test, dettagli PWA, protocollo WS e note architetturali, consulta `readme_tecnical.md`.# sharetext
+
 Webapp per condividere snippet di testo (e file) in tempo reale.
 Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanilla JS.
 
