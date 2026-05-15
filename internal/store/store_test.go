@@ -25,6 +25,28 @@ func openTestWithOptions(t *testing.T, opts Options) *Store {
 	return s
 }
 
+func TestSecureDeletePragmaApplied(t *testing.T) {
+	s := openTestWithOptions(t, Options{SecureDelete: true})
+	var v int
+	if err := s.db.QueryRow(`PRAGMA secure_delete`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != 1 {
+		t.Fatalf("secure_delete PRAGMA = %d, want 1", v)
+	}
+}
+
+func TestSecureDeletePragmaOff(t *testing.T) {
+	s := openTest(t)
+	var v int
+	if err := s.db.QueryRow(`PRAGMA secure_delete`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != 0 {
+		t.Fatalf("secure_delete PRAGMA = %d, want 0 by default", v)
+	}
+}
+
 func TestCreateAndGet(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()

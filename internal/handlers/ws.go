@@ -40,8 +40,12 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// AllowedOrigins augments the same-origin default. The request Host is
+	// always authorized by the library, so leaving the list empty enforces
+	// strict same-origin and closes the cross-site WebSocket hijacking foot-
+	// gun that `InsecureSkipVerify: true` would have left open.
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
+		OriginPatterns: a.AllowedOrigins,
 	})
 	if err != nil {
 		return

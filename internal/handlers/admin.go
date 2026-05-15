@@ -9,33 +9,54 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/crypto/bcrypt"
 
 	"sharetext/internal/store"
 )
 
+// BasicAuthConfig configures the admin basic-auth middleware. Either PassHash
+// (preferred, bcrypt) or Pass (plaintext, legacy) must be set alongside User
+// for the middleware to be enabled; if both are empty the middleware returns
+// 503 for every request. PassHash takes precedence when both are provided.
+type BasicAuthConfig struct {
+	User     string
+	Pass     string
+	PassHash string
+	Realm    string
+}
+
 // BasicAuth returns middleware that protects routes with HTTP Basic auth.
-// If user or pass is empty the middleware returns 503 for every request
-// (admin disabled). Credentials are compared in constant time.
-func BasicAuth(user, pass, realm string) func(http.Handler) http.Handler {
-	if realm == "" {
-		realm = "Restricted"
+// User comparison is constant-time. Password comparison uses bcrypt when a
+// hash is configured, falling back to constant-time string compare for the
+// legacy plaintext path.
+func BasicAuth(cfg BasicAuthConfig) func(http.Handler) http.Handler {
+	if cfg.Realm == "" {
+		cfg.Realm = "Restricted"
 	}
-	if user == "" || pass == "" {
+	if cfg.User == "" || (cfg.Pass == "" && cfg.PassHash == "") {
 		return func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, "admin disabled: set ADMIN_USER and ADMIN_PASS", http.StatusServiceUnavailable)
+				http.Error(w, "admin disabled: set ADMIN_USER and either ADMIN_PASS or ADMIN_PASS_HASH", http.StatusServiceUnavailable)
 			})
 		}
 	}
-	expU := []byte(user)
-	expP := []byte(pass)
+	expU := []byte(cfg.User)
+	expP := []byte(cfg.Pass)
+	hash := []byte(cfg.PassHash)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			u, p, ok := r.BasicAuth()
 			uOK := ok && subtle.ConstantTimeCompare([]byte(u), expU) == 1
-			pOK := ok && subtle.ConstantTimeCompare([]byte(p), expP) == 1
+			pOK := false
+			if ok {
+				if len(hash) > 0 {
+					pOK = bcrypt.CompareHashAndPassword(hash, []byte(p)) == nil
+				} else {
+					pOK = subtle.ConstantTimeCompare([]byte(p), expP) == 1
+				}
+			}
 			if !uOK || !pOK {
-				w.Header().Set("WWW-Authenticate", `Basic realm="`+realm+`", charset="UTF-8"`)
+				w.Header().Set("WWW-Authenticate", `Basic realm="`+cfg.Realm+`", charset="UTF-8"`)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}

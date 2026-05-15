@@ -2,14 +2,33 @@ import { parseBlocks } from './blocks.js';
 import { appendLinkified } from './linkify.js';
 import { formatRemaining, msUntil, isExpired } from './countdown.js';
 import { buildFilename, downloadText } from './download.js';
-import { parseFileMarker, buildFileMarker, formatBytes, insertMarkersAtPosition } from './files.js';
+import {
+  parseFileMarker,
+  buildFileMarker,
+  buildFileMarkerRaw,
+  formatBytes,
+  insertMarkersAtPosition,
+} from './files.js';
 import { shouldApplyRemoteContent, shouldFlushPendingLocalChanges } from './sync.js';
+import {
+  importKey,
+  encryptText,
+  decryptText,
+  encryptBytes,
+  decryptBytes,
+  encryptName,
+  decryptName,
+  isCiphertext,
+  isEncryptedName,
+} from './crypto.js';
+import { downloadZip } from './bundle-client.js';
 import {
   classifyLock,
   canEditNow,
   nextHeartbeatDelayMs,
   shouldAutoRelease,
   shouldRequestLock,
+  parseIdleReleaseMs,
   LOCK_STATE_FREE,
   LOCK_STATE_MINE,
   LOCK_STATE_THEIRS,
@@ -41,7 +60,7 @@ const $toggleView = document.getElementById('toggle-view');
 const $editPane = document.querySelector('.pane.edit');
 const $lockBadge = document.getElementById('lock-badge');
 
-const IDLE_RELEASE_MS = 5000;
+const IDLE_RELEASE_MS = parseIdleReleaseMs(document.body.dataset.idleRelease, 3000);
 
 function setEditing(on) {
   if (!$session || !$toggleView) return;
@@ -80,6 +99,99 @@ let heartbeatTimer = null;
 let idleTimer = null;
 let pendingUploadOffset = null;
 let isOffline = false;
+
+// End-to-end encryption mode. 'pending' until the first snapshot lands, then
+// fixed: 'plain' for legacy sessions, 'e2e' once we know the key matches the
+// content (or for fresh empty sessions opened with a key), 'locked' when the
+// content is encrypted but we don't have the key in the URL fragment.
+let cryptoKey = null;
+let sessionMode = 'pending';
+const $decryptBanner = document.getElementById('decrypt-banner');
+
+function parseKeyFromHash() {
+  const h = location.hash || '';
+  const m = h.match(/(?:^#|&)k=([A-Za-z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
+function setDecryptBanner(text) {
+  if (!$decryptBanner) return;
+  if (!text) {
+    $decryptBanner.hidden = true;
+    $decryptBanner.textContent = '';
+    return;
+  }
+  $decryptBanner.hidden = false;
+  $decryptBanner.textContent = text;
+}
+
+function determineSessionMode(initialContent) {
+  if (isCiphertext(initialContent)) {
+    sessionMode = cryptoKey ? 'e2e' : 'locked';
+  } else if (initialContent === '' && cryptoKey) {
+    sessionMode = 'e2e';
+  } else {
+    sessionMode = 'plain';
+  }
+}
+
+async function encryptOutgoing(text) {
+  if (sessionMode === 'e2e' && cryptoKey) {
+    return await encryptText(cryptoKey, text);
+  }
+  return text;
+}
+
+async function decryptIncoming(content) {
+  // Mode is settled at initial snapshot but may need to flip when a peer
+  // changes the session-wide encryption posture afterwards. The session was
+  // empty when we joined? → we picked 'plain' if we had no key, 'e2e' if we
+  // did. If a keyed peer then types, we now see ciphertext arrive in 'plain'
+  // mode and need to react. The reverse (e2e session goes plaintext) is
+  // possible only via a legacy/malicious client; in that case we let the
+  // plaintext through so the user is not stuck with stale ciphertext.
+  if (isCiphertext(content)) {
+    if (cryptoKey) {
+      if (sessionMode !== 'e2e') {
+        sessionMode = 'e2e';
+        applyModeUI();
+      }
+      try { return await decryptText(cryptoKey, content); }
+      catch { return null; }
+    }
+    if (sessionMode !== 'locked') {
+      sessionMode = 'locked';
+      applyModeUI();
+    }
+    return null;
+  }
+  return content;
+}
+
+// Serialise async snapshot/edit applies so a faster second message doesn't
+// overtake a slower decrypt of an earlier one.
+let applyQueue = Promise.resolve();
+function enqueueApply(fn) {
+  applyQueue = applyQueue.then(fn).catch((err) => {
+    console.error('apply failed', err);
+  });
+  return applyQueue;
+}
+
+function applyModeUI() {
+  if (sessionMode === 'locked') {
+    setDecryptBanner('Sessione cifrata: chiave mancante nell’URL. Apri il link completo per leggere.');
+  } else if (sessionMode === 'pending') {
+    setDecryptBanner('Decifratura…');
+  } else {
+    setDecryptBanner('');
+  }
+  updateLockUI();
+}
+
+function isLockedForEditing() {
+  return sessionMode === 'locked' || sessionMode === 'pending';
+}
 
 function setStatus(online) {
   $status.textContent = online ? 'online' : 'offline';
@@ -186,13 +298,21 @@ function renderFileRow(li, num, fm) {
   icon.className = 'file-icon';
   icon.textContent = '📎';
 
+  const cached = fileMetaCache.get(fm.id);
+  // Prefer the plaintext name from the meta cache (populated by
+  // loadFileMeta() or the upload response). When the marker carries an
+  // encrypted name and the cache hasn't been filled yet, fall back to a
+  // placeholder rather than printing the ciphertext.
+  const displayName =
+    (cached && cached.name) ||
+    (isEncryptedName(fm.encodedName) ? '(allegato cifrato)' : fm.name);
+
   const name = document.createElement('span');
   name.className = 'file-name';
-  name.textContent = fm.name;
+  name.textContent = displayName;
 
   const meta = document.createElement('span');
   meta.className = 'file-meta';
-  const cached = fileMetaCache.get(fm.id);
   meta.textContent = cached && Number.isFinite(cached.size) ? formatBytes(cached.size) : '';
 
   info.append(icon, name, meta);
@@ -202,43 +322,83 @@ function renderFileRow(li, num, fm) {
   const dl = document.createElement('a');
   dl.className = 'ghost copy';
   dl.href = `/api/sessions/${encodeURIComponent(slug)}/files/${encodeURIComponent(fm.id)}`;
-  dl.setAttribute('download', fm.name);
+  dl.setAttribute('download', displayName);
   dl.textContent = 'Scarica';
+  // E2E mode: the server only has ciphertext bytes; intercept the click to
+  // fetch, decrypt, and surface a Blob URL with the plaintext filename.
+  dl.addEventListener('click', async (ev) => {
+    if (sessionMode !== 'e2e' || !cryptoKey) return; // legacy plaintext flow
+    ev.preventDefault();
+    try {
+      const res = await fetch(dl.href);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const ct = new Uint8Array(await res.arrayBuffer());
+      const pt = await decryptBytes(cryptoKey, ct);
+      const meta2 = fileMetaCache.get(fm.id);
+      const mime = (meta2 && meta2.mime) || 'application/octet-stream';
+      const blob = new Blob([pt], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (meta2 && meta2.name) || displayName;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 0);
+    } catch (err) {
+      console.error('e2e download failed', err);
+      toast('Decifratura fallita');
+    }
+  });
   actions.append(dl);
 
   li.append(num, info, actions);
   $lines.appendChild(li);
 }
 
-function applyRemote(content, { initialSnapshot = false } = {}) {
+async function applyRemote(rawContent, { initialSnapshot = false } = {}) {
+  const plain = await decryptIncoming(rawContent);
+  if (plain === null) {
+    // Locked mode or decrypt failure: keep the editor empty so the user never
+    // sees raw ciphertext, and don't disturb pending local state (there
+    // shouldn't be any since we forced readOnly).
+    return false;
+  }
   if (!shouldApplyRemoteContent({
     currentContent: $content.value,
-    incomingContent: content,
+    incomingContent: plain,
     hasPendingLocalChanges,
     initialSnapshot,
   })) {
-    lastServerContent = content;
+    lastServerContent = plain;
     return false;
   }
   const sel = [$content.selectionStart, $content.selectionEnd];
   suppressSend = true;
-  $content.value = content;
+  $content.value = plain;
   try { $content.setSelectionRange(sel[0], sel[1]); } catch {}
   suppressSend = false;
-  renderItems(content);
-  lastSent = content;
-  lastServerContent = content;
+  renderItems(plain);
+  lastSent = plain;
+  lastServerContent = plain;
   return true;
 }
 
-function send(content) {
+async function send(content) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   if (content === lastSent) {
     hasPendingLocalChanges = false;
     return true;
   }
+  let wire;
   try {
-    ws.send(JSON.stringify({ type: 'edit', content }));
+    wire = await encryptOutgoing(content);
+  } catch (err) {
+    console.error('encrypt failed, not transmitting', err);
+    return false;
+  }
+  try {
+    ws.send(JSON.stringify({ type: 'edit', content: wire }));
   } catch {
     return false;
   }
@@ -300,7 +460,7 @@ function scheduleIdleRelease() {
 
 function updateLockUI() {
   const locked = lockState === LOCK_STATE_THEIRS;
-  const blocked = locked || isOffline;
+  const blocked = locked || isOffline || isLockedForEditing();
   if ($editPane) $editPane.classList.toggle('locked-by-other', locked);
   if ($content) {
     $content.readOnly = blocked;
@@ -408,11 +568,11 @@ function startCountdown(iso) {
   countdownTimer = setInterval(tick, 1000);
 }
 
-function applySessionPayload(s, { initialSnapshot = false } = {}) {
+async function applySessionPayload(s, { initialSnapshot = false } = {}) {
   if (initialSnapshot && typeof s.client_id === 'string' && s.client_id) {
     clientID = s.client_id;
   }
-  if (typeof s.content === 'string') applyRemote(s.content, { initialSnapshot });
+  if (typeof s.content === 'string') await applyRemote(s.content, { initialSnapshot });
   if (s.expires_at !== undefined) {
     if (s.expires_at) startCountdown(s.expires_at);
     else if ($countdown) $countdown.hidden = true;
@@ -445,23 +605,33 @@ function connect() {
   });
   ws.addEventListener('error', () => ws.close());
   ws.addEventListener('message', (ev) => {
-    try {
-      const msg = JSON.parse(ev.data);
-      if (msg && msg.type === 'lock') {
-        applyLockSnapshot(msg.lock || null);
-        return;
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg && msg.type === 'lock') {
+      applyLockSnapshot(msg.lock || null);
+      return;
+    }
+    if (msg && msg.type === 'lock_denied') {
+      applyLockSnapshot(msg.lock || null);
+      return;
+    }
+    const initialSnapshot = awaitingInitialSnapshot;
+    awaitingInitialSnapshot = false;
+    // Serialise async applies so a faster decrypt can't overtake a slower one
+    // that arrived before it.
+    enqueueApply(async () => {
+      // Server may send a snapshot whose content is encrypted before we have
+      // finished settling the session mode (e.g. WS hello races the initial
+      // GET on first load). Settle it now if still pending.
+      if (initialSnapshot && sessionMode === 'pending' && typeof msg.content === 'string') {
+        determineSessionMode(msg.content);
+        applyModeUI();
       }
-      if (msg && msg.type === 'lock_denied') {
-        applyLockSnapshot(msg.lock || null);
-        return;
-      }
-      const initialSnapshot = awaitingInitialSnapshot;
-      awaitingInitialSnapshot = false;
-      applySessionPayload(msg, { initialSnapshot });
+      await applySessionPayload(msg, { initialSnapshot });
       if (shouldFlushPendingLocalChanges({ initialSnapshot, hasPendingLocalChanges })) {
         flushPendingLocalChanges();
       }
-    } catch {}
+    });
   });
 }
 
@@ -677,6 +847,15 @@ window.addEventListener('scroll', () => { if (menuVisible()) positionMenu(menuTo
 
 $content.addEventListener('beforeinput', (ev) => {
   if (expiredHandled) return;
+  if (sessionMode === 'locked') {
+    ev.preventDefault();
+    toast('Sessione cifrata: chiave mancante');
+    return;
+  }
+  if (sessionMode === 'pending') {
+    ev.preventDefault();
+    return;
+  }
   if (isOffline) {
     ev.preventDefault();
     toast('Offline — sola lettura');
@@ -690,7 +869,7 @@ $content.addEventListener('beforeinput', (ev) => {
 
 $content.addEventListener('input', () => {
   if (suppressSend || expiredHandled) return;
-  if (isOffline || !canEditNow(lockState)) {
+  if (isLockedForEditing() || isOffline || !canEditNow(lockState)) {
     // beforeinput should have prevented this, but if a browser doesn't
     // honour it (rare), restore server content as a safety net.
     revertToServerContent();
@@ -717,9 +896,33 @@ window.addEventListener('beforeunload', () => {
 $copyAll.addEventListener('click', () => copyText($content.value));
 $copyLink.addEventListener('click', () => copyText(location.href));
 if ($downloadAll) {
-  $downloadAll.addEventListener('click', () => {
-    // Server-side zip bundle (text + all attachments).
-    window.location.href = `/api/sessions/${encodeURIComponent(slug)}/bundle`;
+  $downloadAll.addEventListener('click', async () => {
+    if (sessionMode !== 'e2e' || !cryptoKey) {
+      // Legacy plaintext flow: server-side zip is usable as-is.
+      window.location.href = `/api/sessions/${encodeURIComponent(slug)}/bundle`;
+      return;
+    }
+    // E2E: fetch each file, decrypt, assemble plaintext zip in-browser.
+    try {
+      $downloadAll.disabled = true;
+      const entries = [];
+      // Session text decrypted from the editor buffer (already plaintext).
+      entries.push({ name: `${slug}.txt`, data: new TextEncoder().encode($content.value) });
+      for (const [id, meta] of fileMetaCache.entries()) {
+        const r = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files/${encodeURIComponent(id)}`);
+        if (!r.ok) throw new Error(`fetch ${id}: ${r.status}`);
+        const ct = new Uint8Array(await r.arrayBuffer());
+        const pt = await decryptBytes(cryptoKey, ct);
+        const safeName = (meta.name || `file-${id}.bin`).replace(/[\\/]/g, '_');
+        entries.push({ name: `files/${safeName}`, data: pt });
+      }
+      downloadZip(`${slug}.zip`, entries);
+    } catch (err) {
+      console.error('e2e bundle failed', err);
+      toast('Pacchetto fallito');
+    } finally {
+      $downloadAll.disabled = false;
+    }
   });
 }
 
@@ -730,8 +933,17 @@ function clientHeaders(extra = {}) {
 }
 
 async function uploadOne(file) {
+  const e2e = sessionMode === 'e2e' && cryptoKey;
+  let blob = file;
+  let serverName = file.name;
+  if (e2e) {
+    const raw = new Uint8Array(await file.arrayBuffer());
+    const enc = await encryptBytes(cryptoKey, raw);
+    blob = new Blob([enc], { type: 'application/octet-stream' });
+    serverName = await encryptName(cryptoKey, file.name);
+  }
   const fd = new FormData();
-  fd.append('file', file, file.name);
+  fd.append('file', blob, serverName);
   const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files`, {
     method: 'POST',
     body: fd,
@@ -741,8 +953,21 @@ async function uploadOne(file) {
   if (res.status === 413) throw new Error(`File troppo grande: ${file.name}`);
   if (!res.ok) throw new Error(`Upload fallito (${res.status}) per ${file.name}`);
   const data = await res.json();
-  fileMetaCache.set(data.id, { name: data.filename, size: data.size, mime: data.mime });
-  return data; // { id, filename, size, mime, marker, url }
+  // Server records ciphertext bytes and (in E2E) the encrypted filename. The
+  // local meta cache however stores PLAINTEXT name/size so the UI can render
+  // human-friendly labels and accurate sizes; the rest of the app never sees
+  // the on-wire encrypted values.
+  const plainSize = e2e ? file.size : data.size;
+  fileMetaCache.set(data.id, {
+    name: file.name,
+    size: plainSize,
+    mime: file.type || data.mime,
+    encryptedName: e2e ? data.filename : null,
+  });
+  // Build a marker the editor will later parse: in E2E use the encrypted
+  // filename verbatim so the marker's encodedName carries the iv.ct payload.
+  const marker = e2e ? buildFileMarkerRaw(data.id, data.filename) : data.marker;
+  return { ...data, marker, plainName: file.name, plainSize };
 }
 
 function caretOffsetFromEvent(ev) {
@@ -773,11 +998,18 @@ async function pushContent(text) {
   // broadcasts to all peers, including this client's WS.
   hasPendingLocalChanges = true;
   lastSent = text;
+  let wire;
+  try {
+    wire = await encryptOutgoing(text);
+  } catch (err) {
+    console.error('encrypt failed, dropping PUT', err);
+    return;
+  }
   try {
     const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}`, {
       method: 'PUT',
       headers: clientHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ content: text }),
+      body: JSON.stringify({ content: wire }),
     });
     if (res.status === 409) {
       throw new Error('Editor bloccato da un altro utente');
@@ -820,7 +1052,7 @@ async function handleUploads(files, atOffset) {
     try {
       const up = await uploadOne(f);
       markers.push(up.marker);
-      toast(`Caricato ${up.filename}`);
+      toast(`Caricato ${up.plainName || up.filename}`);
     } catch (e) {
       errors.push(e.message);
       console.error('upload failed', e);
@@ -909,28 +1141,71 @@ async function loadFileMeta() {
     const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files`);
     if (!res.ok) return;
     const data = await res.json();
-    (data.files || []).forEach((f) => {
-      fileMetaCache.set(f.id, { name: f.filename, size: f.size, mime: f.mime });
-    });
+    const e2e = sessionMode === 'e2e' && cryptoKey;
+    for (const f of data.files || []) {
+      let plainName = f.filename;
+      let encName = null;
+      if (e2e && isEncryptedName(f.filename)) {
+        encName = f.filename;
+        try {
+          plainName = await decryptName(cryptoKey, f.filename);
+        } catch {
+          plainName = '(allegato cifrato)';
+        }
+      }
+      fileMetaCache.set(f.id, {
+        name: plainName,
+        size: f.size,
+        mime: f.mime,
+        encryptedName: encName,
+      });
+    }
     renderItems($content.value);
   } catch {}
 }
 
-fetch(`/api/sessions/${encodeURIComponent(slug)}`)
-  .then((r) => {
+// Bootstrap: import the URL-fragment key (if any) BEFORE the initial fetch
+// finishes, so the session-mode decision in `applySessionPayload` is made
+// against a fully-settled `cryptoKey`. Decifratura banner stays up until
+// the snapshot has been applied.
+(async () => {
+  applyModeUI(); // show "Decifratura…" while we work
+
+  const keyB64 = parseKeyFromHash();
+  if (keyB64) {
+    try { cryptoKey = await importKey(keyB64); }
+    catch (err) {
+      console.warn('failed to import key from URL fragment', err);
+      cryptoKey = null;
+    }
+  }
+
+  let snapshot = null;
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(slug)}`);
     if (r.status === 410 || r.status === 404) {
       handleExpired();
-      return null;
+      return;
     }
-    return r.ok ? r.json() : Promise.reject(new Error('load failed'));
-  })
-  .then((s) => { if (s) applySessionPayload(s, { initialSnapshot: true }); })
-  .catch(() => {})
-  .finally(() => {
-    if (expiredHandled) return;
-    loadFileMeta();
-    connect();
-  });
+    if (!r.ok) throw new Error('load failed');
+    snapshot = await r.json();
+  } catch (err) {
+    console.error('initial fetch failed', err);
+  }
+
+  if (snapshot) {
+    determineSessionMode(typeof snapshot.content === 'string' ? snapshot.content : '');
+    applyModeUI();
+    await applySessionPayload(snapshot, { initialSnapshot: true });
+  } else {
+    // Couldn't reach the server. Stay in pending mode until WS settles it.
+    applyModeUI();
+  }
+
+  if (expiredHandled) return;
+  await loadFileMeta();
+  connect();
+})();
 
 initOfflineGuard({
   onOnline: () => {

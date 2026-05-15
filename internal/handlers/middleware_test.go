@@ -38,6 +38,39 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 	}
 }
 
+func TestSecurityHeadersHSTSAppliedBehindProxyHTTPS(t *testing.T) {
+	mw := SecurityHeaders(SecurityHeadersConfig{
+		Enabled:                 true,
+		StrictTransportSecurity: "max-age=31536000; includeSubDomains",
+	})
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if got := w.Header().Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
+		t.Fatalf("HSTS not set behind proxy: %q", got)
+	}
+}
+
+func TestSecurityHeadersHSTSOmittedOnPlainHTTP(t *testing.T) {
+	mw := SecurityHeaders(SecurityHeadersConfig{
+		Enabled:                 true,
+		StrictTransportSecurity: "max-age=31536000",
+	})
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if got := w.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Fatalf("HSTS should not leak on plain HTTP: %q", got)
+	}
+}
+
 func TestIPRateLimiterBlocksBurst(t *testing.T) {
 	mw := NewIPRateLimiter(RateLimitConfig{
 		Enabled:           true,

@@ -18,6 +18,7 @@ type appConfig struct {
 	FileGrace               time.Duration
 	VacuumInterval          time.Duration
 	LockTTL                 time.Duration
+	LockIdleRelease         time.Duration
 	MaxFileSize             int64
 	MaxContentSize          int64
 	MaxFilesPerSession      int
@@ -26,6 +27,9 @@ type appConfig struct {
 	FileStorageDir          string
 	AdminUser               string
 	AdminPass               string
+	AdminPassHash           string
+	AllowedOrigins          []string
+	SecureDelete            bool
 	RateLimitEnabled        bool
 	RateLimitRPS            float64
 	RateLimitBurst          int
@@ -61,6 +65,7 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		FileGrace:               durationEnv(getenv, "FILE_GRACE", 60*time.Second, 60*time.Second),
 		VacuumInterval:          durationEnv(getenv, "VACUUM_INTERVAL", 0, 0),
 		LockTTL:                 durationEnv(getenv, "LOCK_TTL", handlers.DefaultLockTTL, time.Second),
+		LockIdleRelease:         durationEnv(getenv, "LOCK_IDLE_RELEASE", 3*time.Second, time.Second),
 		MaxFileSize:             int64Env(getenv, "MAX_FILE_SIZE", handlers.MaxFileSize),
 		MaxContentSize:          int64Env(getenv, "MAX_CONTENT_SIZE", handlers.MaxContentSize),
 		MaxFilesPerSession:      intEnv(getenv, "MAX_FILES_PER_SESSION", 256),
@@ -69,6 +74,9 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		FileStorageDir:          strings.TrimSpace(getenv("FILE_STORAGE_DIR")),
 		AdminUser:               strings.TrimSpace(getenv("ADMIN_USER")),
 		AdminPass:               getenv("ADMIN_PASS"),
+		AdminPassHash:           strings.TrimSpace(getenv("ADMIN_PASS_HASH")),
+		AllowedOrigins:          splitOrigins(getenv("ALLOWED_ORIGINS")),
+		SecureDelete:            boolEnv(getenv, "SECURE_DELETE", true),
 		RateLimitEnabled:        boolEnv(getenv, "RATE_LIMIT_ENABLED", true),
 		RateLimitRPS:            floatEnv(getenv, "RATE_LIMIT_RPS", 20),
 		RateLimitBurst:          intEnv(getenv, "RATE_LIMIT_BURST", 60),
@@ -81,11 +89,11 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		IdleTimeout:             durationEnv(getenv, "IDLE_TIMEOUT", 2*time.Minute, 2*time.Minute),
 		MaxHeaderBytes:          intEnv(getenv, "MAX_HEADER_BYTES", 1<<20),
 		SecurityHeadersEnabled:  boolEnv(getenv, "SECURITY_HEADERS_ENABLED", true),
-		ContentSecurityPolicy:   envOrWith(getenv, "CONTENT_SECURITY_POLICY", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self'; manifest-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"),
+		ContentSecurityPolicy:   envOrWith(getenv, "CONTENT_SECURITY_POLICY", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self'; manifest-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"),
 		FrameOptions:            envOrWith(getenv, "FRAME_OPTIONS", "DENY"),
 		ReferrerPolicy:          envOrWith(getenv, "REFERRER_POLICY", "no-referrer"),
 		PermissionsPolicy:       envOrWith(getenv, "PERMISSIONS_POLICY", "camera=(), microphone=(), geolocation=()"),
-		StrictTransportSecurity: strings.TrimSpace(getenv("STRICT_TRANSPORT_SECURITY")),
+		StrictTransportSecurity: envOrWith(getenv, "STRICT_TRANSPORT_SECURITY", "max-age=31536000; includeSubDomains"),
 		MetricsEnabled:          boolEnv(getenv, "METRICS_ENABLED", true),
 		AuditLogEnabled:         boolEnv(getenv, "AUDIT_LOG_ENABLED", true),
 		AuditLogDefaultLimit:    intEnv(getenv, "AUDIT_LOG_DEFAULT_LIMIT", 50),
@@ -99,6 +107,7 @@ func (c appConfig) storeOptions() store.Options {
 		MaxFilesPerSession:     c.MaxFilesPerSession,
 		MaxSessionStorageBytes: c.MaxSessionStorageBytes,
 		AuditLogEnabled:        c.AuditLogEnabled,
+		SecureDelete:           c.SecureDelete,
 	}
 }
 
@@ -143,6 +152,21 @@ func durationEnv(getenv func(string) string, key string, def, min time.Duration)
 		}
 	}
 	return def
+}
+
+func splitOrigins(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func boolEnv(getenv func(string) string, key string, def bool) bool {

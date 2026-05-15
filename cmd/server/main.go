@@ -38,7 +38,8 @@ func init() {
 }
 
 type pageData struct {
-	Slug string
+	Slug          string
+	IdleReleaseMs int64
 }
 
 func main() {
@@ -60,6 +61,7 @@ func main() {
 		SlugLen:              cfg.SlugLen,
 		Metrics:              metrics,
 		AuditLogDefaultLimit: cfg.AuditLogDefaultLimit,
+		AllowedOrigins:       cfg.AllowedOrigins,
 	}
 
 	tplFS, err := fs.Sub(assets, "templates")
@@ -144,7 +146,7 @@ func main() {
 				http.NotFound(w, r)
 				return
 			}
-			if err := tpl.ExecuteTemplate(w, "session.html", pageData{Slug: slug}); err != nil {
+			if err := tpl.ExecuteTemplate(w, "session.html", pageData{Slug: slug, IdleReleaseMs: cfg.LockIdleRelease.Milliseconds()}); err != nil {
 				log.Printf("render session: %v", err)
 			}
 		})
@@ -161,7 +163,12 @@ func main() {
 		g.Get("/ws/{slug}", api.WS)
 	})
 
-	adminAuth := handlers.BasicAuth(cfg.AdminUser, cfg.AdminPass, "sharetext-admin")
+	adminAuth := handlers.BasicAuth(handlers.BasicAuthConfig{
+		User:     cfg.AdminUser,
+		Pass:     cfg.AdminPass,
+		PassHash: cfg.AdminPassHash,
+		Realm:    "sharetext-admin",
+	})
 	r.Group(func(g chi.Router) {
 		g.Use(adminRateLimit)
 		g.Use(adminAuth)

@@ -7,6 +7,7 @@ import {
   nextHeartbeatDelayMs,
   shouldAutoRelease,
   shouldRequestLock,
+  parseIdleReleaseMs,
   LOCK_STATE_FREE,
   LOCK_STATE_MINE,
   LOCK_STATE_THEIRS,
@@ -79,4 +80,22 @@ test('shouldAutoRelease: only when mine and idle', () => {
   assert.equal(shouldAutoRelease({ state: LOCK_STATE_FREE, lastInputAt: now - 6000, nowMs: now, idleMs: 5000 }), false);
   assert.equal(shouldAutoRelease({ state: LOCK_STATE_THEIRS, lastInputAt: now - 6000, nowMs: now, idleMs: 5000 }), false);
   assert.equal(shouldAutoRelease({ state: LOCK_STATE_MINE, lastInputAt: NaN, nowMs: now, idleMs: 5000 }), false);
+});
+
+test('parseIdleReleaseMs returns fallback for missing/invalid input', () => {
+  assert.equal(parseIdleReleaseMs(undefined, 3000), 3000);
+  assert.equal(parseIdleReleaseMs(null, 3000), 3000);
+  assert.equal(parseIdleReleaseMs('', 3000), 3000);
+  assert.equal(parseIdleReleaseMs('abc', 3000), 3000);
+  assert.equal(parseIdleReleaseMs('0', 3000), 3000);
+  assert.equal(parseIdleReleaseMs('-5', 3000), 3000);
+});
+
+test('parseIdleReleaseMs parses positive integers, flooring below minMs', () => {
+  assert.equal(parseIdleReleaseMs('3000', 3000), 3000);
+  assert.equal(parseIdleReleaseMs('7000', 3000), 7000);
+  // Below minMs (default 1000) gets clamped up.
+  assert.equal(parseIdleReleaseMs('200', 3000), 1000);
+  // Custom minMs.
+  assert.equal(parseIdleReleaseMs('500', 3000, 100), 500);
 });

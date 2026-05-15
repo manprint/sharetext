@@ -51,7 +51,7 @@ test-race:
 
 # Run JS tests (block parser + countdown + download helpers + editor lock + PWA)
 test-js:
-    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs cmd/server/static/editor.test.mjs cmd/server/static/lock.test.mjs cmd/server/static/linkify.test.mjs cmd/server/static/sw-routes.test.mjs cmd/server/static/offline-guard.test.mjs
+    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs cmd/server/static/editor.test.mjs cmd/server/static/lock.test.mjs cmd/server/static/linkify.test.mjs cmd/server/static/sw-routes.test.mjs cmd/server/static/offline-guard.test.mjs cmd/server/static/crypto.test.mjs cmd/server/static/bundle-client.test.mjs
 
 # Run all tests
 test-all: test test-js

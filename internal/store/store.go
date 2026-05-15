@@ -59,6 +59,9 @@ func OpenWithOptions(path string, opts Options) (*Store, error) {
 		return nil, err
 	}
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
+	if normalized.SecureDelete {
+		dsn += "&_pragma=secure_delete(1)"
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

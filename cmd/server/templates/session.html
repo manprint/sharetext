@@ -10,8 +10,9 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body data-slug="{{.Slug}}">
+<body data-slug="{{.Slug}}" data-idle-release="{{.IdleReleaseMs}}">
   <div id="offline-banner" class="offline-banner" hidden>Offline — sola lettura</div>
+  <div id="decrypt-banner" class="decrypt-banner" hidden></div>
   <header class="bar">
     <a href="/" class="brand">sharetext <span class="app-version">{{version}}</span></a>
     <div class="meta">

@@ -16,6 +16,10 @@ type Options struct {
 	MaxFilesPerSession     int
 	MaxSessionStorageBytes int64
 	AuditLogEnabled        bool
+	// SecureDelete toggles SQLite's `secure_delete` PRAGMA so deleted rows
+	// are zeroed in free pages rather than left readable until overwrite.
+	// Matters when the DB file may be backed up or stolen.
+	SecureDelete bool
 }
 
 func (o Options) normalized(dbPath string) (Options, error) {

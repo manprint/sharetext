@@ -25,10 +25,14 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		"AUDIT_LOG_ENABLED":         "false",
 		"AUDIT_LOG_DEFAULT_LIMIT":   "75",
 		"LOCK_TTL":                  "25s",
+		"LOCK_IDLE_RELEASE":         "7s",
 	}
 	cfg := loadConfigFromEnv(func(key string) string { return env[key] })
 	if cfg.LockTTL != 25*time.Second {
 		t.Fatalf("expected LOCK_TTL=25s, got %s", cfg.LockTTL)
+	}
+	if cfg.LockIdleRelease != 7*time.Second {
+		t.Fatalf("expected LOCK_IDLE_RELEASE=7s, got %s", cfg.LockIdleRelease)
 	}
 	if cfg.Port != "9090" || cfg.DBPath != "/tmp/sharetext.db" {
 		t.Fatalf("unexpected basic config: %+v", cfg)
@@ -74,5 +78,18 @@ func TestLoadConfigFromEnvFallsBackOnInvalidValues(t *testing.T) {
 	}
 	if cfg.LockTTL != handlers.DefaultLockTTL {
 		t.Fatalf("expected LOCK_TTL default %s, got %s", handlers.DefaultLockTTL, cfg.LockTTL)
+	}
+	if cfg.LockIdleRelease != 3*time.Second {
+		t.Fatalf("expected LOCK_IDLE_RELEASE default 3s, got %s", cfg.LockIdleRelease)
+	}
+}
+
+func TestLoadConfigFromEnvLockIdleReleaseRejectsSubSecond(t *testing.T) {
+	env := map[string]string{
+		"LOCK_IDLE_RELEASE": "500ms",
+	}
+	cfg := loadConfigFromEnv(func(key string) string { return env[key] })
+	if cfg.LockIdleRelease != 3*time.Second {
+		t.Fatalf("expected fallback to 3s when LOCK_IDLE_RELEASE < 1s, got %s", cfg.LockIdleRelease)
 	}
 }

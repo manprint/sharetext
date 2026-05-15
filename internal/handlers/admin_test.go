@@ -11,12 +11,17 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/crypto/bcrypt"
 
 	"sharetext/internal/store"
 	"sharetext/internal/telemetry"
 )
 
 func newAdminRouter(t *testing.T, user, pass string) (*API, *chi.Mux) {
+	return newAdminRouterCfg(t, BasicAuthConfig{User: user, Pass: pass, Realm: "admin"})
+}
+
+func newAdminRouterCfg(t *testing.T, auth BasicAuthConfig) (*API, *chi.Mux) {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.OpenWithOptions(filepath.Join(dir, "admin.db"), store.Options{AuditLogEnabled: true})
@@ -27,7 +32,7 @@ func newAdminRouter(t *testing.T, user, pass string) (*API, *chi.Mux) {
 	api := &API{Store: st, Hub: NewHub(), SlugLen: 16, Metrics: telemetry.NewMetrics(true), AuditLogDefaultLimit: 50}
 	r := chi.NewRouter()
 	r.Group(func(g chi.Router) {
-		g.Use(BasicAuth(user, pass, "admin"))
+		g.Use(BasicAuth(auth))
 		g.Get("/admin/api/sessions", api.AdminList)
 		g.Get("/admin/api/audit", api.AdminAudit)
 		g.Get("/admin/api/metrics", api.AdminMetrics)
@@ -83,6 +88,63 @@ func TestAdminDisabledWhenCredsMissing(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("want 503, got %d", w.Code)
+	}
+}
+
+func TestAdminAuthBcryptHashAcceptsValidPassword(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("s3cret!"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, r := newAdminRouterCfg(t, BasicAuthConfig{User: "admin", PassHash: string(hash), Realm: "admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/sessions", nil)
+	req.Header.Set("Authorization", basicAuthHeader("admin", "s3cret!"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+}
+
+func TestAdminAuthBcryptHashRejectsWrongPassword(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("s3cret!"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, r := newAdminRouterCfg(t, BasicAuthConfig{User: "admin", PassHash: string(hash), Realm: "admin"})
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/sessions", nil)
+	req.Header.Set("Authorization", basicAuthHeader("admin", "wrong"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d", w.Code)
+	}
+}
+
+func TestAdminAuthHashTakesPrecedenceOverPlaintext(t *testing.T) {
+	// Even when both Pass and PassHash are set, hash wins. Verify by passing a
+	// hash for one password while Pass holds a different one — only the
+	// hashed password should authenticate.
+	hash, err := bcrypt.GenerateFromPassword([]byte("hashed"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, r := newAdminRouterCfg(t, BasicAuthConfig{User: "admin", Pass: "plain", PassHash: string(hash), Realm: "admin"})
+	// Wrong: plaintext "plain" should NOT be accepted when hash is set.
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/sessions", nil)
+	req.Header.Set("Authorization", basicAuthHeader("admin", "plain"))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("plaintext path leaked when hash present: got %d", w.Code)
+	}
+	// Right: bcrypt match.
+	req2 := httptest.NewRequest(http.MethodGet, "/admin/api/sessions", nil)
+	req2.Header.Set("Authorization", basicAuthHeader("admin", "hashed"))
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("hashed path failed: got %d", w2.Code)
 	}
 }
 

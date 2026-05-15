@@ -7,6 +7,7 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 
 - [Caratteristiche](#caratteristiche)
 - [Avvio rapido](#avvio-rapido)
+- [Sicurezza & E2E](#sicurezza--e2e)
 - [Variabili d'ambiente](#variabili-dambiente)
 - [API sessioni](#api-sessioni)
 - [Allegati (file)](#allegati-file)
@@ -14,6 +15,7 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 - [Lock di modifica](#lock-di-modifica)
 - [Comandi editor](#comandi-editor)
 - [Vista righe & UI mobile](#vista-righe--ui-mobile)
+- [PWA & offline](#pwa--offline)
 - [Admin](#admin)
 - [Sessioni temporanee — scadenza](#sessioni-temporanee--scadenza)
 - [Pulizia DB](#pulizia-db)
@@ -84,6 +86,23 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 - DB sempre normalizzato; safety net SQL anche se le FK fossero off.
 - I riferimenti `[file:...]` vengono mantenuti incrementalmente in una tabella derivata, evitando full scan del testo a ogni cleanup.
 
+**Sicurezza**
+
+- **Cifratura end-to-end** opzionale per ogni nuova sessione: chiave AES-256-GCM generata nel browser, distribuita via fragment URL `#k=…` (mai inviato al server). Vedi [Sicurezza & E2E](#sicurezza--e2e).
+- **WebSocket origin check** configurabile (`ALLOWED_ORIGINS`); default same-origin.
+- **HSTS** abilitato di default quando il proxy segnala HTTPS.
+- **Admin password con hash bcrypt** (`ADMIN_PASS_HASH`), preferito sul plaintext `ADMIN_PASS`.
+- **`PRAGMA secure_delete=ON`** per evitare residui leggibili nelle pagine libere SQLite.
+- **CSP stretta** di default (no `'unsafe-inline'` su `script-src`), `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Permissions-Policy` minimale. Link nel testo emessi con `rel="noopener noreferrer"` per non leakare il fragment.
+- **Rate limit** per-IP separato per route pubblici e admin.
+
+**PWA**
+
+- Installabile come app: manifest, icone, service worker.
+- Service worker cache-first per asset statici, network-first per shell HTML, stale-while-revalidate per snapshot/listing, cache-first per blob file.
+- Banner "Offline — sola lettura" + offline guard che blocca scrittura e disabilita upload quando il network è down.
+- Cache versionata per `version.Version`: nuovo deploy ⇒ cache invalidata su `activate`.
+
 **Docker**
 
 - Image distroless `static:nonroot`, binary statico, volume `/data` con perms preallocate per UID 65532.
@@ -109,6 +128,33 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 
 ---
 
+## Sicurezza & E2E
+
+### Cifratura end-to-end (sessioni create dopo l'introduzione di questa feature)
+
+- Dalla landing, ogni nuova sessione genera una chiave AES-256-GCM nel browser del creator. La chiave viene appesa al URL dopo `#` (es. `https://host/s/abc-xyz#k=…`). I browser **non** inviano il fragment al server in nessuna richiesta HTTP, quindi il server vede solo ciphertext.
+- Il contenuto testuale viene serializzato come `enc:v1:<iv-b64url>:<ciphertext-b64url>`. I file vengono cifrati come bytes (IV prepended, payload binario). Il nome file viene cifrato separatamente in formato `<iv>.<ct>` e va a riempire il marker `[file:<id>:<name-cifrato>]`.
+- Aprire la sessione **senza** il fragment `#k=…` la mette in modalità "sola lettura cifrata": banner di avviso, editor read-only, niente render del ciphertext grezzo.
+- Sessioni create **prima** dell'introduzione restano plaintext: nessuna migrazione automatica (impossibile senza chiave). Per cifrare contenuti vecchi: creare una nuova sessione e fare copy/paste manuale.
+- **Threat model**: la cifratura protegge da dump del DB, snapshot del disco VPS, accesso operatore al filesystem o al backup. **Non** protegge se l'operatore può sostituire `app.js` con codice malevolo (limite intrinseco di tutti gli E2E in web app), né da chi riceve il link completo.
+- "Copia link" copia `location.href` incluso il fragment → chi riceve può leggere. Cronologia browser, bookmark sync, screenshot esporrebbero la chiave: trattare il link come dato sensibile.
+- Bundle ZIP: per le sessioni E2E il bottone "Scarica" produce uno zip plaintext assemblato lato browser (testo + file decifrati). Per sessioni legacy resta il bundle server-side.
+
+### Hardening server
+
+- **WebSocket origin check**: l'accept rifiuta richieste cross-origin. Configura `ALLOWED_ORIGINS` (CSV) per autorizzare host esterni; vuoto = solo same-origin.
+- **HSTS attivo by default** dietro reverse proxy che inoltra `X-Forwarded-Proto: https` (vedi `STRICT_TRANSPORT_SECURITY`).
+- **Admin con hash bcrypt**: preferire `ADMIN_PASS_HASH` su `ADMIN_PASS`. Genera con:
+  ```bash
+  go run ./scripts/bcrypt-hash 'la-tua-password'
+  # oppure
+  htpasswd -bnBC 12 "" 'la-tua-password' | tr -d ':\n'
+  ```
+- **`PRAGMA secure_delete=ON`** (env `SECURE_DELETE`, default `true`): zera le pagine libere SQLite invece di lasciare residui leggibili.
+- **CSP stretta** (default sgancia `'unsafe-inline'` da `script-src`): se passi una CSP custom via env, includere `worker-src 'self'; manifest-src 'self'` per non rompere SW + manifest PWA.
+
+---
+
 ## Variabili d'ambiente
 
 | Variabile | Default | Descrizione |
@@ -121,8 +167,9 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 | `VACUUM_INTERVAL` | `0s` (off) | Frequenza `VACUUM` SQLite + `wal_checkpoint(TRUNCATE)` per reclaim spazio. `0` o vuoto = disabilitato. |
 | `FILE_GRACE` | `60s` | Finestra di grazia per upload appena fatti (evita race su marker) |
 | `LOCK_TTL` | `15s` | TTL del lock di modifica editor. Un client che detiene il lock deve inviare un heartbeat entro questo intervallo, altrimenti il server libera il lock e un altro utente puo' acquisirlo. Minimo accettato: `1s`. |
+| `LOCK_IDLE_RELEASE` | `3s` | Tempo di inattività dopo cui il client che detiene il lock lo rilascia spontaneamente, così che un altro utente possa prendere il turno. Il valore viene servito al browser via attributo `data-idle-release` su `<body>`. Minimo accettato: `1s`; valori più piccoli vengono ignorati e si ricade sul default. |
 | `MAX_FILE_SIZE` | `10485760` | Limite massimo upload per singolo file in byte. Default 10 MiB. |
-| `MAX_CONTENT_SIZE` | `4194304` | Limite massimo del contenuto testuale di sessione in byte. Vale per `PUT` e WebSocket. |
+| `MAX_CONTENT_SIZE` | `6291456` | Limite massimo del contenuto testuale di sessione in byte. Vale per `PUT` e WebSocket. Il default (6 MiB) lascia spazio all'inflazione ~34% del ciphertext AES-GCM base64, mantenendo la capacità plaintext effettiva attorno ai 4 MiB. |
 | `MAX_FILES_PER_SESSION` | `256` | Numero massimo di allegati per sessione. `0` disabilita il limite. |
 | `MAX_SESSION_STORAGE_BYTES` | `104857600` | Quota massima complessiva per sessione: `len(content) + somma(size files)`. `0` disabilita il limite. |
 | `FILE_STORAGE_BACKEND` | `db` | Backend allegati: `db` (BLOB in SQLite) oppure `fs` (filesystem). |
@@ -143,12 +190,15 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 | `FRAME_OPTIONS` | `DENY` | Valore di `X-Frame-Options`. |
 | `REFERRER_POLICY` | `no-referrer` | Valore di `Referrer-Policy`. |
 | `PERMISSIONS_POLICY` | `camera=(), microphone=(), geolocation=()` | Valore di `Permissions-Policy`. |
-| `STRICT_TRANSPORT_SECURITY` | _(unset)_ | Se impostata, viene inviata come `Strict-Transport-Security` su richieste HTTPS/proxy HTTPS. |
+| `STRICT_TRANSPORT_SECURITY` | `max-age=31536000; includeSubDomains` | Header `Strict-Transport-Security` inviato quando la richiesta è HTTPS o il proxy segnala `X-Forwarded-Proto: https`. Imposta a stringa vuota per disabilitare. |
+| `ALLOWED_ORIGINS` | _(unset)_ | Lista comma-separated di origin autorizzati a parlare con il WebSocket. Vuoto = solo same-origin (Host header). Se la CSP custom è stretta, ricordare di includere `worker-src 'self'; manifest-src 'self'`. |
+| `SECURE_DELETE` | `true` | Attiva `PRAGMA secure_delete=ON` sul DB: le righe cancellate vengono azzerate nelle pagine libere invece di restare leggibili fino alla riscrittura. |
 | `METRICS_ENABLED` | `true` | Abilita la raccolta di metriche operative in memoria e l'endpoint admin dedicato. |
 | `AUDIT_LOG_ENABLED` | `true` | Abilita la persistenza degli audit log admin. |
 | `AUDIT_LOG_DEFAULT_LIMIT` | `50` | Limite di default di `/admin/api/audit` quando manca `?limit=`. |
 | `ADMIN_USER` | _(unset)_ | Username Basic Auth per `/admin`. Se vuoto, admin disabilitato (503). |
-| `ADMIN_PASS` | _(unset)_ | Password Basic Auth per `/admin`. Se vuota, admin disabilitato (503). |
+| `ADMIN_PASS` | _(unset)_ | Password Basic Auth per `/admin` (plaintext, legacy). Se vuota e `ADMIN_PASS_HASH` non è impostata, admin disabilitato (503). |
+| `ADMIN_PASS_HASH` | _(unset)_ | Hash bcrypt della password admin (preferito su `ADMIN_PASS`). Se entrambi impostati, l'hash vince. Genera con `go run sharetext/scripts/bcrypt-hash` o `htpasswd -bnBC 12 "" 'pass'`. |
 
 Compose passa tutto via env override (`${VAR:-default}`).
 
@@ -367,7 +417,7 @@ Le operazioni di **scrittura** (edit testuale, upload file, drag&drop) sono mutu
 - Un solo `client_id` alla volta puo' detenere il **lock di modifica** di una sessione. Tutti gli altri vedono l'editor in **sola lettura grigio** con un badge `🔒 in modifica` e tooltip esplicito.
 - Il lock viene **acquisito automaticamente** al primo write (testo o upload) eseguito da un client identificato (header `X-Client-ID` per HTTP, `client_id` di connessione per WS). Non serve un round-trip esplicito: il cliente puo' anche emettere `{"type":"lock_acquire"}` per acquisire il lock in modo ottimistico prima che parta il primo input (cosi' i peer vedono immediatamente l'editor grigio).
 - Il lock ha **TTL** configurabile via `LOCK_TTL` (default `15s`). Il detentore invia un `lock_heartbeat` ad intervalli `<= LOCK_TTL/2` per rinnovarlo.
-- Il client rilascia il lock spontaneamente dopo `5s` di inattivita' (`lock_release`), oppure quando l'utente chiude la pagina/tab (`beforeunload`). Il server rilascia il lock anche alla chiusura della WebSocket (per qualsiasi motivo: navigazione, network blip, kill della tab).
+- Il client rilascia il lock spontaneamente dopo `LOCK_IDLE_RELEASE` di inattività (default `3s`, configurabile via env; vedi [Variabili d'ambiente](#variabili-dambiente)) emettendo `lock_release`, oppure quando l'utente chiude la pagina/tab (`beforeunload`). Il server rilascia il lock anche alla chiusura della WebSocket (per qualsiasi motivo: navigazione, network blip, kill della tab).
 
 ### Garanzie
 
@@ -467,6 +517,41 @@ L'handler può essere `async` (il dispatcher attende la `Promise`). Le primitive
 - Hit-target ≥38px sui bottoni header, ≥42px sul pulsante Elimina admin.
 
 Viewport meta: `width=device-width, initial-scale=1, viewport-fit=cover`. `theme-color: #0f766e` per UI di sistema (status bar mobile, browser chrome).
+
+---
+
+## PWA & offline
+
+L'app è una Progressive Web App installabile: manifest, icone, service worker e shell cacheata permettono apertura offline e behavior consistente quando la rete è instabile.
+
+### Manifest + icone
+
+- `static/manifest.webmanifest` con `name`, `short_name`, `theme_color: #0f766e`, `background_color`, `display: standalone`.
+- Icone `icon-192.png`, `icon-512.png`, `icon-maskable.svg`, `apple-touch-icon` (`icon-180.png`).
+- Indirizzo manifest registrato in `<head>` di landing e session. Browser compatibili offrono "Aggiungi alla schermata Home".
+
+### Service worker
+
+- Generato a partire da `cmd/server/sw.js.tmpl`, servito su `/sw.js` con `Service-Worker-Allowed: /` e `Cache-Control: no-cache` (il byte-diff su deploy nuovo triggera install+activate del nuovo SW).
+- Cache name versionata su `internal/version.Version`: ogni release evict completamente le cache precedenti in `activate`.
+- Strategie di routing (definite in `static/sw-routes.js`, riusabili e testate):
+  - **Asset statici** (`/static/*` ad esclusione di `sw.js` e `manifest.webmanifest`) → cache-first.
+  - **Shell HTML** (`/`, `/s/{slug}`) → network-first con fallback alla shell cacheata.
+  - **Snapshot sessione** (`GET /api/sessions/{slug}`) → stale-while-revalidate.
+  - **Listing file metadata** (`GET /api/sessions/{slug}/files`) → stale-while-revalidate.
+  - **Download file binario** (`GET /api/sessions/{slug}/files/{id}`) → cache-first blob.
+  - **Bundle ZIP**, **WebSocket upgrade**, **healthz**, **admin**, **scritture (POST/PUT/DELETE)** → passthrough, mai cacheate.
+- Le richieste non classificate restano passthrough; il routing è puro JS testato in `sw-routes.test.mjs` (oltre 15 casi).
+
+### Offline guard lato client
+
+- Listener su `navigator.onLine` + ping periodico → banner "Offline — sola lettura" appeso in cima alla session.
+- Quando offline: editor diventa read-only (`readOnly = true`), upload e bottoni di scrittura disabilitati, debounce locale interrotto, riconciliazione differita alla riconnessione.
+- Module pure `offline-guard.js` con stato gestito a init time, transizioni testate in `offline-guard.test.mjs` (coerce truthy/falsy, ritorno booleano solo sui cambi di stato effettivi).
+
+### Cifratura ed E2E
+
+Le risorse cacheate dal service worker sono opache: testo cifrato resta cifrato anche nella cache. La decifratura avviene client-side post-`fetch`/post-`match`, quindi il SW non altera né legge il plaintext.
 
 ---
 
@@ -725,6 +810,7 @@ just test-js        # solo JS (node:test)
 
 ### Go
 
+- `cmd/server` (config loader): override env, fallback su valori invalidi, default `LOCK_TTL` / `LOCK_IDLE_RELEASE` (con rifiuto valori sotto 1s).
 - `internal/session`:
   - `NewSlug` (length, alfabeto, unicità su 1000 iterazioni);
   - `ValidName` (regex, edge case lunghezza, accenti, caratteri proibiti);
@@ -736,13 +822,16 @@ just test-js        # solo JS (node:test)
   - `files`: AddFile (missing/expired session), GetFile, ListFiles, DeleteFile;
   - cascade FK su session delete e DeleteExpired;
   - `ReferencedFileIDs` (regex marker, edge case);
-  - `DeleteOrphanFiles`: unreferenced + grace protection + safety-net fallback con FK off.
+  - `DeleteOrphanFiles`: unreferenced + grace protection + safety-net fallback con FK off;
+  - `secure_delete` PRAGMA letto correttamente quando l'opzione è attiva.
 - `internal/handlers`:
   - API sessioni (httptest): persistent/temporary validi e invalidi (400), 410 su scaduta su GET e PUT;
   - hub broadcast / except / leave;
-  - WebSocket end-to-end con 2 client + slug inesistente;
-  - admin: missing/wrong creds (401), creds vuote (503), list (200 con esclusione scaduti, total_size con files), delete (200 + 404 idempotenza), delete unauthorized;
-  - file: upload happy/missing/unknown/oversize (413), download (binary + Content-Disposition), list, bundle ZIP (verificato letto via `archive/zip`, dedup nomi duplicati).
+  - WebSocket end-to-end con 2 client + slug inesistente + origin foreign rifiutato (403) + same-host accettato (101);
+  - admin: missing/wrong creds (401), creds vuote (503), list (200 con esclusione scaduti, total_size con files), delete (200 + 404 idempotenza), delete unauthorized; branch bcrypt (`ADMIN_PASS_HASH`) valido e invalido, timing-safe;
+  - middleware: HSTS applicato su `X-Forwarded-Proto: https`;
+  - file: upload happy/missing/unknown/oversize (413), download (binary + Content-Disposition), list, bundle ZIP (verificato letto via `archive/zip`, dedup nomi duplicati);
+  - lock: acquire/release/heartbeat, denial cross-client, auto-release su disconnect.
 
 ### JS (`node:test`)
 
@@ -751,6 +840,13 @@ just test-js        # solo JS (node:test)
 - `download.test.mjs`: `safeFilename` (caratteri proibiti, controllo, truncate 80, fallback), `buildFilename` (slug/kind/index, sanitize, defaults).
 - `files.test.mjs`: `parseFileMarker` (valid, encoded, whitespace, inline rejection, malformed, non-string), `buildFileMarker` (roundtrip, fallback), `formatBytes`.
 - `commands.test.mjs`: `findSlashTokenAtCaret` (token a fine buffer / dopo whitespace / a inizio riga, prefissi parziali, URL e path interni rifiutati, caret in mezzo a un token, clamp out-of-range, non-string), `filterCommands` (match prefisso case-insensitive), `formatTimestamp` (zero padding, valori massimi, default `now`), registry (`registerCommand` validazione + handler async, `dispatchCommand` happy/unknown/missing-ctx).
+- `crypto.test.mjs`: roundtrip `encryptText`/`decryptText`, unicità IV su due encrypt dello stesso plaintext, ciphertext-su-empty-string conserva prefisso `enc:v1:`, tampering byte → `OperationError`, roundtrip binario via `encryptBytes`/`decryptBytes`, encoding nome cifrato (`encryptName`/`decryptName`), `isCiphertext`/`isEncryptedName` discrimination.
+- `bundle-client.test.mjs`: builder ZIP STORE method (no compressione) per sessioni E2E — build + parsing entries via `DecompressionStream` di un consumer-side, dedup nomi duplicati, bytes integrity.
+- `linkify.test.mjs`: rendering anchor con `rel="noopener noreferrer" target="_blank"`, scheme http/https only, evita falsi positivi e URL troncati.
+- `lock.test.mjs`: stati `classifyLock`, `canEditNow`, `shouldRequestLock`, `nextHeartbeatDelayMs` (half-TTL clamp min/max, fallback senza expiry), `shouldAutoRelease` (idle gating), `parseIdleReleaseMs` (fallback su input invalido, clamp a `minMs`).
+- `sync.test.mjs`: `shouldApplyRemoteContent` (apply su delta vivente, ignora snapshot iniziale con changes pending, ignora content uguale) e `shouldFlushPendingLocalChanges` (flush solo dopo l'initial snapshot).
+- `offline-guard.test.mjs`: state iniziale, transizione `setOnline` (boolean return solo su cambio effettivo), coercion truthy/falsy.
+- `sw-routes.test.mjs`: classificazione delle richieste (asset statici cached, shell HTML network-first, snapshot/listing SWR, file blob cache-first, bundle/POST/PUT/DELETE/admin/healthz/manifest/sw passthrough, query string ininfluente, URL malformati passthrough).
 
 ---
 
@@ -781,40 +877,59 @@ Env (vedi tabella sopra) sono passabili via `-e` o `compose.yaml`.
 
 ```
 cmd/server/
-  main.go                  bootstrap, env parsing, route mount, cleanup goroutine
+  main.go                  bootstrap, env parsing, route mount, cleanup/vacuum goroutines
+  config.go                loader env → appConfig
+  config_test.go           tabella env + fallback
+  sw.js.tmpl               template service worker (cache name = version)
   templates/
     index.html             landing (form a due modalità)
-    session.html           pagina sessione (editor + righe + toolbar)
+    session.html           pagina sessione (editor + righe + toolbar + data-idle-release)
     admin.html             pannello admin
   static/
-    style.css              CSS unico (desktop + mobile + admin)
-    app.js                 client sessione: WS, debounce, render, drag-drop, toggle mobile
+    style.css              CSS unico (desktop + mobile + admin + offline banner)
+    manifest.webmanifest   PWA manifest (icone, theme color, display standalone)
+    icon-*.png, *.svg      icone PWA (192, 512, maskable, apple-touch)
+    favicon.svg            favicon
+    app.js                 client sessione: WS, debounce, render, drag-drop, toggle mobile, E2E gating
+    create.js              landing form: genera AES key client-side, appende #k=… al redirect
+    crypto.js              wrapper Web Crypto AES-256-GCM (encrypt/decrypt text/bytes/name)
+    bundle-client.js       ZIP builder client-side (STORE) per sessioni E2E
     blocks.js              parser blocchi (`-----`)
     countdown.js           helpers countdown (formattazione, msUntil, isExpired)
     download.js            helpers download client-side (sanitize filename, blob trigger)
     files.js               parser marker file, builder marker, formatBytes
+    linkify.js             render anchor (rel="noopener noreferrer", target="_blank")
     commands.js            registry slash-command + parser + formatTimestamp
+    lock.js                helpers lock client-side (state classification, heartbeat, idle release)
+    sync.js                helpers sync (apply remote / flush pending)
+    offline-guard.js       online/offline state, banner + read-only switch
+    sw-routes.js           classificazione richieste service worker (testabile)
     admin.js               client admin: list, delete, mobile cards
-    blocks.test.mjs        node:test
-    commands.test.mjs      node:test
-    countdown.test.mjs     node:test
-    download.test.mjs      node:test
-    files.test.mjs         node:test
+    *.test.mjs             node:test (blocks, bundle-client, commands, countdown, crypto, download,
+                           files, linkify, lock, offline-guard, sw-routes, sync)
 internal/
   session/                 slug crypto-random + validazione nome
   store/
-    store.go               sessions CRUD + scadenza + DeleteExpired + ListActive
+    store.go               sessions CRUD + scadenza + DeleteExpired + ListActive + secure_delete
     files.go               files CRUD + ReferencedFileIDs + DeleteOrphanFiles
+    options.go             Options (FileBackend, MaxFilesPerSession, SecureDelete, ...)
   handlers/
-    api.go                 CRUD sessioni HTTP
-    ws.go                  WebSocket handler
+    api.go                 CRUD sessioni HTTP (X-Client-ID, lock auto-acquire)
+    ws.go                  WebSocket handler (OriginPatterns da ALLOWED_ORIGINS)
     hub.go                 pub/sub in-memory per stanza
-    admin.go               basic auth + list + delete
+    lock.go                LockManager TTL + heartbeat/acquire/release
+    admin.go               basic auth (bcrypt + plaintext) + list + delete + audit + metrics
+    audit.go               audit log admin
+    middleware.go          security headers (CSP, HSTS, ...) + rate limit per-IP
     files.go               upload + download + list + bundle ZIP
+  telemetry/
+    metrics.go             contatori in-memory + endpoint admin
   version/
     version.go             Version var (ldflags-overridable)
+scripts/
+  bcrypt-hash/main.go      helper CLI per generare ADMIN_PASS_HASH
 Dockerfile                 multi-stage, distroless, ARG VERSION
-compose.yaml               servizio con volume + build-arg
+compose.yaml               servizio con volume + build-arg + tutte le env
 Justfile                   ricette (run, build, test*, up, down, smoke)
 README.md                  questo file
 ```

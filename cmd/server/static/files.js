@@ -13,11 +13,13 @@
 const FILE_RE = /^\s*\[file:([A-Za-z0-9_-]+):([^\]]+)\]\s*$/;
 
 /**
- * parseFileMarker(line) → { id, name } when the line is a file marker,
- * otherwise null.
+ * parseFileMarker(line) → { id, name, encodedName } when the line is a file
+ * marker, otherwise null. `encodedName` is the raw second-slot content; in
+ * E2E mode the caller passes it through `decryptName` to recover the
+ * plaintext filename.
  *
  * @param {string} line
- * @returns {{id:string, name:string}|null}
+ * @returns {{id:string, name:string, encodedName:string}|null}
  */
 export function parseFileMarker(line) {
   if (typeof line !== 'string') return null;
@@ -29,7 +31,7 @@ export function parseFileMarker(line) {
   } catch {
     name = m[2];
   }
-  return { id: m[1], name };
+  return { id: m[1], name, encodedName: m[2] };
 }
 
 /**
@@ -42,6 +44,20 @@ export function parseFileMarker(line) {
  */
 export function buildFileMarker(id, name) {
   return `[file:${id}:${encodeURIComponent(String(name == null ? 'file.bin' : name))}]`;
+}
+
+/**
+ * buildFileMarkerRaw(id, encodedName) → marker string with `encodedName`
+ * inserted into the name slot as-is (no URL encoding). Used by the E2E
+ * upload path which already produces a base64url-encoded `iv.ct` payload
+ * compatible with the marker grammar.
+ *
+ * @param {string} id
+ * @param {string} encodedName
+ * @returns {string}
+ */
+export function buildFileMarkerRaw(id, encodedName) {
+  return `[file:${id}:${encodedName}]`;
 }
 
 /**

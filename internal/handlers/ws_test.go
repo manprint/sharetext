@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -391,6 +392,37 @@ func TestWSLegacyEditMessageStillWorks(t *testing.T) {
 			return
 		}
 	}
+}
+
+func TestWSRejectsForeignOrigin(t *testing.T) {
+	srv, api := newWSServer(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "origincheck"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	hdr := http.Header{}
+	hdr.Set("Origin", "https://evil.example")
+	if _, _, err := websocket.Dial(ctx, wsURL(srv.URL, "origincheck"), &websocket.DialOptions{HTTPHeader: hdr}); err == nil {
+		t.Fatal("expected dial to fail with foreign origin")
+	}
+}
+
+func TestWSAllowsConfiguredOrigin(t *testing.T) {
+	srv, api := newWSServer(t)
+	api.AllowedOrigins = []string{"evil.example"}
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "originallow"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	hdr := http.Header{}
+	hdr.Set("Origin", "https://evil.example")
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "originallow"), &websocket.DialOptions{HTTPHeader: hdr})
+	if err != nil {
+		t.Fatalf("dial with allow-listed origin failed: %v", err)
+	}
+	defer c.CloseNow()
 }
 
 func TestWSRejectsOversizedMessage(t *testing.T) {
