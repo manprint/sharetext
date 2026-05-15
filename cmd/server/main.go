@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"html/template"
 	"io/fs"
@@ -44,6 +45,7 @@ func init() {
 type pageData struct {
 	Slug          string
 	IdleReleaseMs int64
+	ManifestPath  string
 }
 
 func main() {
@@ -165,9 +167,32 @@ func main() {
 
 	r.Group(func(g chi.Router) {
 		g.Use(publicRateLimit)
+		g.Get("/manifest/session/{slug}.webmanifest", func(w http.ResponseWriter, r *http.Request) {
+			slug := chi.URLParam(r, "slug")
+			ok, err := st.Exists(r.Context(), slug)
+			if err != nil {
+				http.Error(w, "internal", http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			if err := json.NewEncoder(w).Encode(sessionManifest(slug)); err != nil {
+				log.Printf("render session manifest: %v", err)
+			}
+		})
 		g.With(requestTimeout).Get("/", func(w http.ResponseWriter, r *http.Request) {
 			if err := tpl.ExecuteTemplate(w, "index.html", nil); err != nil {
 				log.Printf("render index: %v", err)
+			}
+		})
+		g.With(requestTimeout).Get("/launch/{slug}", func(w http.ResponseWriter, r *http.Request) {
+			slug := chi.URLParam(r, "slug")
+			if err := tpl.ExecuteTemplate(w, "launcher.html", pageData{Slug: slug, ManifestPath: sessionManifestPath(slug)}); err != nil {
+				log.Printf("render launcher: %v", err)
 			}
 		})
 		g.With(requestTimeout).Get("/s/{slug}", func(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +206,7 @@ func main() {
 				http.NotFound(w, r)
 				return
 			}
-			if err := tpl.ExecuteTemplate(w, "session.html", pageData{Slug: slug, IdleReleaseMs: cfg.LockIdleRelease.Milliseconds()}); err != nil {
+			if err := tpl.ExecuteTemplate(w, "session.html", pageData{Slug: slug, IdleReleaseMs: cfg.LockIdleRelease.Milliseconds(), ManifestPath: sessionManifestPath(slug)}); err != nil {
 				log.Printf("render session: %v", err)
 			}
 		})

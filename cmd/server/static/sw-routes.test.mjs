@@ -17,6 +17,7 @@ test("static assets are cached", () => {
 test("shells (landing + session) are network-first cacheable", () => {
   assert.equal(cls("/"), "shell");
   assert.equal(cls("/s/abc-123"), "shell");
+  assert.equal(cls("/launch/abc-123"), "shell");
 });
 
 test("session snapshot GET is SWR-eligible", () => {

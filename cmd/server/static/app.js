@@ -51,6 +51,7 @@ import {
   formatTimestamp,
 } from './commands.js';
 import { initOfflineGuard, setOfflineBanner } from './offline-guard.js';
+import { rememberPinnedSession } from './pinning.js';
 
 const slug = document.body.dataset.slug;
 const $content = document.getElementById('content');
@@ -1264,6 +1265,7 @@ async function loadFileMeta() {
 (async () => {
   applyModeUI(); // show "Decifratura…" while we work
 
+  let pinKey = null;
   const keyB64 = parseKeyFromHash();
   if (keyB64) {
     try { cryptoKey = await importKey(keyB64); }
@@ -1271,7 +1273,9 @@ async function loadFileMeta() {
       console.warn('failed to import key from URL fragment', err);
       cryptoKey = null;
     }
+    if (cryptoKey) pinKey = keyB64;
   }
+  rememberPinnedSession(window.localStorage, slug, pinKey);
 
   let snapshot = null;
   try {

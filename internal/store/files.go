@@ -414,4 +414,3 @@ func (s *Store) fsSessionSlugsWithoutSession(ctx context.Context) ([]string, err
 	}
 	return out, rows.Err()
 }
-

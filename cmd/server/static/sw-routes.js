@@ -24,7 +24,7 @@
     if (pathname === "/sw.js" || pathname === "/manifest.webmanifest") return "passthrough";
     if (pathname === "/healthz") return "passthrough";
     if (pathname.startsWith("/ws/")) return "passthrough";
-    if (pathname === "/" || pathname.startsWith("/s/")) return "shell";
+    if (pathname === "/" || pathname.startsWith("/s/") || pathname.startsWith("/launch/")) return "shell";
 
     const api = pathname.match(/^\/api\/sessions\/([^\/]+)(?:\/(.*))?$/);
     if (api) {

@@ -533,9 +533,10 @@ L'app è una Progressive Web App installabile: manifest, icone, service worker e
 
 ### Manifest + icone
 
-- `static/manifest.webmanifest` con `name`, `short_name`, `theme_color: #0f766e`, `background_color`, `display: standalone`.
+- `static/manifest.webmanifest` con `name`, `short_name`, `theme_color: #0f766e`, `background_color`, `display: standalone` per la landing/root app.
+- Le pagine sessione servono invece un **manifest dinamico per slug** su `/manifest/session/{slug}.webmanifest`: `id` e `start_url` puntano a `/launch/{slug}`, cosi' un "Aggiungi alla schermata Home" fatto dalla sessione pina proprio quella sessione invece della home.
 - Icone `icon-192.png`, `icon-512.png`, `icon-maskable.svg`, `apple-touch-icon` (`icon-180.png`).
-- Indirizzo manifest registrato in `<head>` di landing e session. Browser compatibili offrono "Aggiungi alla schermata Home".
+- Il launcher `/launch/{slug}` recupera localmente l'eventuale chiave `#k=...` gia' vista su quel dispositivo e reindirizza a `/s/{slug}#k=...` senza inviarla mai al server.
 
 ### Service worker
 
@@ -543,7 +544,7 @@ L'app è una Progressive Web App installabile: manifest, icone, service worker e
 - Cache name versionata su `internal/version.Version`: ogni release evict completamente le cache precedenti in `activate`.
 - Strategie di routing (definite in `static/sw-routes.js`, riusabili e testate):
   - **Asset statici** (`/static/*` ad esclusione di `sw.js` e `manifest.webmanifest`) → cache-first.
-  - **Shell HTML** (`/`, `/s/{slug}`) → network-first con fallback alla shell cacheata.
+  - **Shell HTML** (`/`, `/s/{slug}`, `/launch/{slug}`) → network-first con fallback alla shell cacheata.
   - **Snapshot sessione** (`GET /api/sessions/{slug}`) → stale-while-revalidate.
   - **Listing file metadata** (`GET /api/sessions/{slug}/files`) → **passthrough** (no cache). Cachare anche con SWR vorrebbe dire che un upload di un peer apparirebbe come `(allegato cifrato)` su tutti gli altri client finchè non ricaricano: `loadFileMeta` riceverebbe la lista stantia vuota dal SW. La perdita di offline-read della lista file è accettabile rispetto al rischio di nomi sbagliati su upload concorrenti.
   - **Download file binario** (`GET /api/sessions/{slug}/files/{id}`) → cache-first blob.
@@ -859,6 +860,7 @@ just vet            # go vet
 - `lock.test.mjs`: stati `classifyLock`, `canEditNow`, `shouldRequestLock`, `nextHeartbeatDelayMs` (half-TTL clamp min/max, fallback senza expiry), `shouldAutoRelease` (idle gating), `parseIdleReleaseMs` (fallback su input invalido, clamp a `minMs`).
 - `sync.test.mjs`: `shouldApplyRemoteContent` (apply su delta vivente, ignora snapshot iniziale con changes pending, ignora content uguale) e `shouldFlushPendingLocalChanges` (flush solo dopo l'initial snapshot).
 - `offline-guard.test.mjs`: state iniziale, transizione `setOnline` (boolean return solo su cambio effettivo), coercion truthy/falsy.
+- `pinning.test.mjs`: path launcher/manifest per sessione, persistenza locale della chiave, preservazione della chiave su revisit senza hash, redirect risolto dal launcher.
 - `sw-routes.test.mjs`: classificazione delle richieste (asset statici cached, shell HTML network-first, snapshot/listing SWR, file blob cache-first, bundle/POST/PUT/DELETE/admin/healthz/manifest/sw passthrough, query string ininfluente, URL malformati passthrough).
 
 ---
@@ -897,6 +899,7 @@ cmd/server/
   templates/
     index.html             landing (form a due modalità)
     session.html           pagina sessione (editor + righe + toolbar + data-idle-release)
+    launcher.html          launcher per sessioni pinnate su home screen
     admin.html             pannello admin
   static/
     style.css              CSS unico (desktop + mobile + admin + offline banner)
@@ -912,6 +915,8 @@ cmd/server/
     countdown.js           helpers countdown (formattazione, msUntil, isExpired)
     download.js            helpers download client-side (sanitize filename, blob trigger)
     files.js               parser marker file, builder marker, formatBytes
+    pinning.js             helper pinning client-side (launcher path + storage chiavi locali)
+    pin-launcher.js        launcher client-side che ripristina il deep link di sessione
     linkify.js             render anchor (rel="noopener noreferrer", target="_blank")
     commands.js            registry slash-command + parser + formatTimestamp
     lock.js                helpers lock client-side (state classification, heartbeat, idle release)
@@ -920,7 +925,7 @@ cmd/server/
     sw-routes.js           classificazione richieste service worker (testabile)
     admin.js               client admin: list, delete, mobile cards
     *.test.mjs             node:test (blocks, bundle-client, commands, countdown, crypto, download,
-                           e2e-state, files, linkify, lock, offline-guard, sw-routes, sync)
+                 e2e-state, files, linkify, lock, offline-guard, pinning, sw-routes, sync)
 internal/
   session/                 slug crypto-random + validazione nome
   store/
