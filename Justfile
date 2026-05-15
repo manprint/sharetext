@@ -26,7 +26,7 @@ push-docker-dev-x86:
     docker buildx build --platform linux/amd64 -t {{image_dev_x86}} --push .
     docker buildx rm sharetext-builder || true
 
-push-docker-dev-armo64:
+push-docker-dev-arm64:
     @just docker-login
     docker buildx rm sharetext-builder || true
     docker buildx create --use --name sharetext-builder || true
@@ -49,9 +49,9 @@ test:
 test-race:
     go test -race ./... -count=1
 
-# Run JS tests (block parser + countdown + download helpers + editor lock)
+# Run JS tests (block parser + countdown + download helpers + editor lock + PWA)
 test-js:
-    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs cmd/server/static/editor.test.mjs cmd/server/static/lock.test.mjs cmd/server/static/linkify.test.mjs
+    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs cmd/server/static/editor.test.mjs cmd/server/static/lock.test.mjs cmd/server/static/linkify.test.mjs cmd/server/static/sw-routes.test.mjs cmd/server/static/offline-guard.test.mjs
 
 # Run all tests
 test-all: test test-js
@@ -90,4 +90,11 @@ smoke:
     echo "healthz:"; curl -fsS http://localhost:{{port}}/healthz; echo; \
     echo "create:"; SLUG=$(curl -fsS -X POST http://localhost:{{port}}/api/sessions | tee /dev/stderr | python3 -c 'import sys,json;print(json.load(sys.stdin)["slug"])'); echo; \
     echo "put:"; curl -fsS -X PUT -H 'content-type: application/json' -d '{"content":"smoke"}' http://localhost:{{port}}/api/sessions/$SLUG; echo; \
-    echo "get:"; curl -fsS http://localhost:{{port}}/api/sessions/$SLUG; echo
+    echo "get:"; curl -fsS http://localhost:{{port}}/api/sessions/$SLUG; echo; \
+    echo "manifest:"; curl -fsS http://localhost:{{port}}/static/manifest.webmanifest | python3 -c 'import sys,json;m=json.load(sys.stdin);print(m["name"],m["scope"])'; \
+    echo "sw type:"; curl -fsS -I http://localhost:{{port}}/sw.js | grep -i 'content-type'; \
+    echo "sw versioned:"; curl -fsS http://localhost:{{port}}/sw.js | grep -E 'static-|shells-' | head -1
+
+# (Re)generate PNG PWA icons from icon-maskable.svg. Requires python3 + Pillow.
+icons:
+    python3 scripts/gen-icons.py

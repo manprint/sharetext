@@ -21,6 +21,7 @@ import {
   dispatchCommand,
   formatTimestamp,
 } from './commands.js';
+import { initOfflineGuard, setOfflineBanner } from './offline-guard.js';
 
 const slug = document.body.dataset.slug;
 const $content = document.getElementById('content');
@@ -78,6 +79,7 @@ let lastUserInputAt = 0;
 let heartbeatTimer = null;
 let idleTimer = null;
 let pendingUploadOffset = null;
+let isOffline = false;
 
 function setStatus(online) {
   $status.textContent = online ? 'online' : 'offline';
@@ -298,12 +300,13 @@ function scheduleIdleRelease() {
 
 function updateLockUI() {
   const locked = lockState === LOCK_STATE_THEIRS;
+  const blocked = locked || isOffline;
   if ($editPane) $editPane.classList.toggle('locked-by-other', locked);
   if ($content) {
-    $content.readOnly = locked;
-    $content.setAttribute('aria-readonly', String(locked));
+    $content.readOnly = blocked;
+    $content.setAttribute('aria-readonly', String(blocked));
   }
-  if ($uploadBtn) $uploadBtn.disabled = locked;
+  if ($uploadBtn) $uploadBtn.disabled = blocked;
   if ($lockBadge) {
     $lockBadge.classList.remove('mine', 'theirs');
     if (lockState === LOCK_STATE_MINE) {
@@ -350,7 +353,9 @@ function revertToServerContent() {
     suppressSend = false;
     renderItems(lastServerContent);
     lastSent = lastServerContent;
-    toast('Modifica annullata: editor bloccato da un altro utente');
+    toast(isOffline
+      ? 'Offline — sola lettura'
+      : 'Modifica annullata: editor bloccato da un altro utente');
   }
 }
 
@@ -672,6 +677,11 @@ window.addEventListener('scroll', () => { if (menuVisible()) positionMenu(menuTo
 
 $content.addEventListener('beforeinput', (ev) => {
   if (expiredHandled) return;
+  if (isOffline) {
+    ev.preventDefault();
+    toast('Offline — sola lettura');
+    return;
+  }
   if (!canEditNow(lockState)) {
     ev.preventDefault();
     toast('Editor bloccato da un altro utente');
@@ -680,7 +690,7 @@ $content.addEventListener('beforeinput', (ev) => {
 
 $content.addEventListener('input', () => {
   if (suppressSend || expiredHandled) return;
-  if (!canEditNow(lockState)) {
+  if (isOffline || !canEditNow(lockState)) {
     // beforeinput should have prevented this, but if a browser doesn't
     // honour it (rare), restore server content as a safety net.
     revertToServerContent();
@@ -790,6 +800,10 @@ function appendAtEnd(text, lines) {
 
 async function handleUploads(files, atOffset) {
   if (!files || files.length === 0) return;
+  if (isOffline) {
+    toast('Offline — sola lettura');
+    return;
+  }
   if (!canEditNow(lockState)) {
     toast('Upload bloccato: editor in uso da un altro utente');
     return;
@@ -867,6 +881,10 @@ function onDrop(ev) {
   ev.preventDefault();
   dragDepth = 0;
   $content.classList.remove('drag-over');
+  if (isOffline) {
+    toast('Offline — sola lettura');
+    return;
+  }
   if (!canEditNow(lockState)) {
     toast('Drag&drop bloccato: editor in uso da un altro utente');
     return;
@@ -913,3 +931,29 @@ fetch(`/api/sessions/${encodeURIComponent(slug)}`)
     loadFileMeta();
     connect();
   });
+
+initOfflineGuard({
+  onOnline: () => {
+    isOffline = false;
+    setOfflineBanner(false);
+    updateLockUI();
+    // The WS reconnect loop already nudges itself every ~1.5s after close,
+    // but if it has gone fully dormant (no close pending) kick it once.
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      try { connect(); } catch {}
+    }
+  },
+  onOffline: () => {
+    isOffline = true;
+    setOfflineBanner(true, 'Offline — sola lettura');
+    clearTimeout(debounceTimer);
+    hasPendingLocalChanges = false;
+    updateLockUI();
+  },
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}

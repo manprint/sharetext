@@ -1,0 +1,189 @@
+/* sharetext service worker — read-only offline shell.
+ * Version is injected by the server template ({{.Version}}); changing it
+ * forces a byte-diff, install, and activate-side eviction of stale caches.
+ *
+ * Route classification lives in /static/sw-routes.js so the same logic is
+ * unit-testable from node:test without faking a service worker scope.
+ */
+const VERSION = "{{.Version}}";
+const CACHE = {
+  static:  "static-" + VERSION,
+  shells:  "shells-" + VERSION,
+  api:     "api-" + VERSION,
+  files:   "files-" + VERSION,
+};
+const KNOWN_PREFIXES = ["static-", "shells-", "api-", "files-"];
+
+const PRECACHE_URLS = [
+  "/",
+  "/static/style.css",
+  "/static/app.js",
+  "/static/blocks.js",
+  "/static/linkify.js",
+  "/static/countdown.js",
+  "/static/download.js",
+  "/static/files.js",
+  "/static/sync.js",
+  "/static/lock.js",
+  "/static/commands.js",
+  "/static/offline-guard.js",
+  "/static/sw-routes.js",
+  "/static/favicon.svg",
+  "/static/icon-maskable.svg",
+  "/static/icon-192.png",
+  "/static/icon-512.png",
+  "/static/icon-180.png",
+  "/static/manifest.webmanifest",
+];
+
+const FILES_CACHE_MAX = 30;
+
+importScripts("/static/sw-routes.js");
+
+self.addEventListener("install", (event) => {
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE.static);
+    // Best-effort: a missing optional asset (e.g. an icon not yet generated)
+    // should not block the SW install. Pre-resolve each request and ignore
+    // individual failures.
+    await Promise.all(PRECACHE_URLS.map(async (url) => {
+      try {
+        const res = await fetch(url, { cache: "reload" });
+        if (res && res.ok) await cache.put(url, res.clone());
+      } catch {}
+    }));
+    await self.skipWaiting();
+  })());
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    const current = new Set(Object.values(CACHE));
+    await Promise.all(keys.map((k) => {
+      // Only touch caches we own (prefix match); leave anything else alone so
+      // we never delete a cache another app in the origin scope might use.
+      const owned = KNOWN_PREFIXES.some((p) => k.startsWith(p));
+      if (owned && !current.has(k)) return caches.delete(k);
+      return null;
+    }));
+    await self.clients.claim();
+  })());
+});
+
+self.addEventListener("fetch", (event) => {
+  const req = event.request;
+  // sw-routes.js exports classifyRequest onto `self`.
+  const kind = self.classifyRequest({ url: req.url, method: req.method });
+
+  switch (kind) {
+    case "bypass":
+    case "passthrough":
+      return; // let the browser handle it natively
+    case "static-asset":
+      event.respondWith(cacheFirst(req, CACHE.static));
+      return;
+    case "shell":
+      event.respondWith(networkFirstShell(req, CACHE.shells));
+      return;
+    case "api-snapshot":
+    case "api-files":
+      event.respondWith(staleWhileRevalidate(req, CACHE.api));
+      return;
+    case "api-file-blob":
+      event.respondWith(cacheFirstWithBound(req, CACHE.files, FILES_CACHE_MAX));
+      return;
+    default:
+      return;
+  }
+});
+
+async function cacheFirst(req, cacheName) {
+  const cache = await caches.open(cacheName);
+  const hit = await cache.match(req);
+  if (hit) return hit;
+  try {
+    const res = await fetch(req);
+    if (res && res.ok) cache.put(req, res.clone()).catch(() => {});
+    return res;
+  } catch (err) {
+    // Last-resort match without query/vary normalization
+    const fallback = await cache.match(req, { ignoreSearch: true });
+    if (fallback) return fallback;
+    throw err;
+  }
+}
+
+async function networkFirstShell(req, cacheName) {
+  const cache = await caches.open(cacheName);
+  try {
+    const res = await fetch(req);
+    if (res && res.ok) {
+      cache.put(req, res.clone()).catch(() => {});
+    } else if (res && (res.status === 404 || res.status === 410)) {
+      // Session gone: drop any cached shell so the next offline reload does
+      // not resurrect a dead session URL.
+      cache.delete(req).catch(() => {});
+    }
+    return res;
+  } catch {
+    const hit = await cache.match(req);
+    if (hit) return hit;
+    // Fallback: try the landing page so the user at least gets the app shell.
+    const root = await cache.match("/");
+    if (root) return root;
+    return new Response("Offline", { status: 503, statusText: "Offline" });
+  }
+}
+
+async function staleWhileRevalidate(req, cacheName) {
+  const cache = await caches.open(cacheName);
+  const cached = await cache.match(req);
+  const networkPromise = fetch(req).then((res) => {
+    if (res && res.ok) cache.put(req, res.clone()).catch(() => {});
+    return res;
+  }).catch(() => null);
+  if (cached) {
+    // Kick off background refresh, but don't await it.
+    event_waitUntilSafe(networkPromise);
+    return cached;
+  }
+  const fresh = await networkPromise;
+  if (fresh) return fresh;
+  return new Response(JSON.stringify({ error: "offline" }), {
+    status: 503,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function cacheFirstWithBound(req, cacheName, max) {
+  const cache = await caches.open(cacheName);
+  const hit = await cache.match(req);
+  if (hit) return hit;
+  try {
+    const res = await fetch(req);
+    if (res && res.ok) {
+      await cache.put(req, res.clone());
+      await trimCache(cache, max);
+    }
+    return res;
+  } catch (err) {
+    throw err;
+  }
+}
+
+async function trimCache(cache, max) {
+  const keys = await cache.keys();
+  if (keys.length <= max) return;
+  // Cache.keys() preserves insertion order; evict the oldest until we are
+  // back under the cap.
+  const overflow = keys.length - max;
+  await Promise.all(keys.slice(0, overflow).map((k) => cache.delete(k)));
+}
+
+// Best-effort fire-and-forget for SWR background refresh; we are already
+// outside the fetch event by the time the promise resolves, so there's no
+// FetchEvent.waitUntil handle to attach to. Swallow rejections.
+function event_waitUntilSafe(promise) {
+  promise.catch(() => {});
+}

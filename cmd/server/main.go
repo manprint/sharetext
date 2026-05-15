@@ -7,10 +7,12 @@ import (
 	"html/template"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	texttemplate "text/template"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -24,6 +26,16 @@ import (
 
 //go:embed all:templates all:static
 var assets embed.FS
+
+//go:embed sw.js.tmpl
+var swSource string
+
+func init() {
+	// Stdlib mime package lacks .webmanifest by default; without this, the
+	// FileServer would serve the manifest as text/plain and browsers would
+	// refuse to install the PWA.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
 
 type pageData struct {
 	Slug string
@@ -66,6 +78,12 @@ func main() {
 		log.Fatalf("static fs: %v", err)
 	}
 
+	swTpl, err := texttemplate.New("sw").Parse(swSource)
+	if err != nil {
+		log.Fatalf("parse sw template: %v", err)
+	}
+	swData := struct{ Version string }{Version: version.Version}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
@@ -94,6 +112,19 @@ func main() {
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+
+	// Service worker must be served from root so its default scope covers '/'.
+	// Cache-Control: no-cache so a new deploy is picked up on the next page
+	// load; the SW body changes whenever version changes, which triggers the
+	// browser's "byte-diff" install flow and the activate-side cache eviction.
+	r.Get("/sw.js", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Service-Worker-Allowed", "/")
+		if err := swTpl.Execute(w, swData); err != nil {
+			log.Printf("render sw: %v", err)
+		}
+	})
 
 	r.Group(func(g chi.Router) {
 		g.Use(publicRateLimit)

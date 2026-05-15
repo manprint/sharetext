@@ -6,9 +6,12 @@
   <meta name="theme-color" content="#0f766e">
   <title>sharetext</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/icon-180.png">
+  <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <div id="offline-banner" class="offline-banner" hidden>Offline</div>
   <main class="landing">
     <h1>sharetext <span class="app-version">{{version}}</span></h1>
     <p>Condivisione di snippet di testo in tempo reale.</p>
@@ -103,6 +106,18 @@
         err.hidden = false;
       }
     });
+  </script>
+  <script type="module">
+    import { initOfflineGuard, setOfflineBanner } from '/static/offline-guard.js';
+    initOfflineGuard({
+      onOnline:  () => setOfflineBanner(false),
+      onOffline: () => setOfflineBanner(true, 'Offline'),
+    });
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      });
+    }
   </script>
 </body>
 </html>

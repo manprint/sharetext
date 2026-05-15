@@ -81,7 +81,7 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		IdleTimeout:             durationEnv(getenv, "IDLE_TIMEOUT", 2*time.Minute, 2*time.Minute),
 		MaxHeaderBytes:          intEnv(getenv, "MAX_HEADER_BYTES", 1<<20),
 		SecurityHeadersEnabled:  boolEnv(getenv, "SECURITY_HEADERS_ENABLED", true),
-		ContentSecurityPolicy:   envOrWith(getenv, "CONTENT_SECURITY_POLICY", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"),
+		ContentSecurityPolicy:   envOrWith(getenv, "CONTENT_SECURITY_POLICY", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self'; manifest-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"),
 		FrameOptions:            envOrWith(getenv, "FRAME_OPTIONS", "DENY"),
 		ReferrerPolicy:          envOrWith(getenv, "REFERRER_POLICY", "no-referrer"),
 		PermissionsPolicy:       envOrWith(getenv, "PERMISSIONS_POLICY", "camera=(), microphone=(), geolocation=()"),
