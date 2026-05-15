@@ -12,6 +12,34 @@
 
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
 
+.offline-banner {
+  width: 100%;
+  text-align: center;
+  background: var(--warning);
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 5px 10px;
+  line-height: 1.4;
+}
+.offline-banner[hidden] { display: none; }
+body.offline textarea#content { cursor: not-allowed; background: #fafaf9; }
+body.offline .lock-badge.mine { opacity: 0.5; }
+
+.decrypt-banner {
+  width: 100%;
+  text-align: center;
+  background: #0f766e;
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 5px 10px;
+  line-height: 1.4;
+}
+.decrypt-banner[hidden] { display: none; }
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -126,6 +154,19 @@ button.ghost {
 button.ghost:hover { background: var(--row-hover); color: var(--fg); }
 
 .error { color: var(--danger); margin-top: 1rem; }
+
+.privacy-hint {
+  margin-top: 1.5rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1.5;
+  text-align: left;
+  background: var(--row-hover);
+  border-left: 3px solid var(--accent);
+  padding: 0.6rem 0.75rem;
+  border-radius: 0 4px 4px 0;
+}
+.privacy-hint code { background: white; padding: 0 4px; border-radius: 3px; }
 
 .bar {
   display: flex;

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -390,6 +391,65 @@ func TestWSLegacyEditMessageStillWorks(t *testing.T) {
 		if ev.Type == "" && ev.Content == "legacy" {
 			return
 		}
+	}
+}
+
+func TestWSRejectsForeignOrigin(t *testing.T) {
+	srv, api := newWSServer(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "origincheck"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	hdr := http.Header{}
+	hdr.Set("Origin", "https://evil.example")
+	if _, _, err := websocket.Dial(ctx, wsURL(srv.URL, "origincheck"), &websocket.DialOptions{HTTPHeader: hdr}); err == nil {
+		t.Fatal("expected dial to fail with foreign origin")
+	}
+}
+
+func TestWSAllowsConfiguredOrigin(t *testing.T) {
+	srv, api := newWSServer(t)
+	api.AllowedOrigins = []string{"evil.example"}
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "originallow"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	hdr := http.Header{}
+	hdr.Set("Origin", "https://evil.example")
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "originallow"), &websocket.DialOptions{HTTPHeader: hdr})
+	if err != nil {
+		t.Fatalf("dial with allow-listed origin failed: %v", err)
+	}
+	defer c.CloseNow()
+}
+
+func TestWSReadTimeoutClosesIdleConnection(t *testing.T) {
+	srv, api := newWSServer(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "idlews"}); err != nil {
+		t.Fatal(err)
+	}
+	old := WSReadTimeout
+	WSReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { WSReadTimeout = old })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "idlews"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	// Consume the initial snapshot, then wait silently. The server must close
+	// the connection once WSReadTimeout elapses without a client frame.
+	readJSON(t, ctx, c)
+	start := time.Now()
+	if _, _, err := c.Read(ctx); err == nil {
+		t.Fatal("expected read to fail once server-side read deadline fires")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("read deadline took too long to fire: %s", elapsed)
 	}
 }
 

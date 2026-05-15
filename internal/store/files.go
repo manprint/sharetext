@@ -194,14 +194,11 @@ func (s *Store) ListBundleFiles(ctx context.Context, slug string) ([]File, error
 	return out, rows.Err()
 }
 
-// DeleteOrphanFiles removes attachments that are no longer reachable:
-//   - files whose session is gone (defensive net in case FK cascade is off);
-//   - files older than `grace` whose ID does not appear in any session content
-//     anymore (i.e. the marker was removed from the editor).
-//
-// The grace window prevents racing with a fresh upload whose marker has not
-// yet been pushed via WS/PUT.
-func (s *Store) DeleteOrphanFiles(ctx context.Context, grace time.Duration) (int64, error) {
+// DeleteOrphanFiles removes attachments whose parent session row is already
+// gone. This is a defensive safety net in case FK cascade is disabled or the
+// DB/filesystem drift out of sync; attachments belonging to a live session are
+// intentionally preserved for the full session lifetime.
+func (s *Store) DeleteOrphanFiles(ctx context.Context) (int64, error) {
 	var total int64
 
 	missingSlugs, err := s.fsSessionSlugsWithoutSession(ctx)
@@ -220,30 +217,6 @@ func (s *Store) DeleteOrphanFiles(ctx context.Context, grace time.Duration) (int
 	total += n
 	for _, slug := range missingSlugs {
 		_ = s.removeSessionDir(slug)
-	}
-
-	cutoff := time.Now().Add(-grace).Unix()
-	fsTargets, err := s.fsOrphanFiles(ctx, cutoff)
-	if err != nil {
-		return total, err
-	}
-	res, err = s.db.ExecContext(ctx, `DELETE FROM files
-		WHERE created_at <= ?
-		  AND session_slug IN (SELECT slug FROM sessions)
-		  AND NOT EXISTS (
-		      SELECT 1 FROM file_refs r
-		      WHERE r.session_slug = files.session_slug AND r.file_id = files.id
-		  )`, cutoff)
-	if err != nil {
-		return total, err
-	}
-	n, err = res.RowsAffected()
-	if err != nil {
-		return total, err
-	}
-	total += n
-	for _, target := range fsTargets {
-		_ = s.removeFSFile(target.slug, target.id)
 	}
 	return total, nil
 }
@@ -284,8 +257,19 @@ func (s *Store) syncSessionRefsTx(ctx context.Context, tx *sql.Tx, slug, content
 		return err
 	}
 	defer stmt.Close()
+	now := time.Now().UTC().Unix()
+	mark, err := tx.PrepareContext(ctx, `UPDATE files SET last_referenced_at = ? WHERE id = ? AND session_slug = ?`)
+	if err != nil {
+		return err
+	}
+	defer mark.Close()
 	for id := range refs {
 		if _, err := stmt.ExecContext(ctx, slug, id); err != nil {
+			return err
+		}
+		// Best-effort mark: a marker that points at a non-existent file id is
+		// not an error (legacy content, manually edited marker). Just skip.
+		if _, err := mark.ExecContext(ctx, now, id, slug); err != nil {
 			return err
 		}
 	}
@@ -427,35 +411,6 @@ func (s *Store) fsSessionSlugsWithoutSession(ctx context.Context) ([]string, err
 			return nil, err
 		}
 		out = append(out, slug)
-	}
-	return out, rows.Err()
-}
-
-type fsTarget struct {
-	slug string
-	id   string
-}
-
-func (s *Store) fsOrphanFiles(ctx context.Context, cutoff int64) ([]fsTarget, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT session_slug, id FROM files
-		WHERE storage_backend = ?
-		  AND created_at <= ?
-		  AND session_slug IN (SELECT slug FROM sessions)
-		  AND NOT EXISTS (
-		      SELECT 1 FROM file_refs r
-		      WHERE r.session_slug = files.session_slug AND r.file_id = files.id
-		  )`, FileBackendFS, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []fsTarget
-	for rows.Next() {
-		var target fsTarget
-		if err := rows.Scan(&target.slug, &target.id); err != nil {
-			return nil, err
-		}
-		out = append(out, target)
 	}
 	return out, rows.Err()
 }

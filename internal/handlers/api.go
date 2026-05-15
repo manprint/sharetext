@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -22,7 +23,10 @@ const (
 // ClientIDHeader is the HTTP header carrying the editor-lock client identifier.
 const ClientIDHeader = "X-Client-ID"
 
-var MaxContentSize int64 = 4 * 1024 * 1024
+// 6 MiB leaves room for the ~34% inflation introduced by base64-encoded
+// AES-GCM ciphertext while still capping the effective plaintext payload at
+// roughly 4 MiB.
+var MaxContentSize int64 = 6 * 1024 * 1024
 
 type API struct {
 	Store                *store.Store
@@ -31,6 +35,9 @@ type API struct {
 	SlugLen              int
 	Metrics              *telemetry.Metrics
 	AuditLogDefaultLimit int
+	// AllowedOrigins is forwarded to the WebSocket Accept call. Empty means
+	// same-origin only (request Host is always authorized by the library).
+	AllowedOrigins []string
 }
 
 type createReq struct {
@@ -151,11 +158,12 @@ func (a *API) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	var body updateReq
 	if err := decodeJSONBody(w, r, &body, MaxContentSize+1024); err != nil {
-		status := http.StatusBadRequest
 		if errors.Is(err, errBodyTooLarge) {
-			status = http.StatusRequestEntityTooLarge
+			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+			return
 		}
-		http.Error(w, err.Error(), status)
+		log.Printf("api: decode update body for slug %q: %v", slug, err)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if MaxContentSize > 0 && int64(len(body.Content)) > MaxContentSize {

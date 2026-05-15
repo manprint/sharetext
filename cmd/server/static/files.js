@@ -1,3 +1,5 @@
+import { decryptName, isEncryptedName } from './crypto.js';
+
 /**
  * File-marker parsing helpers for the lines view.
  *
@@ -13,11 +15,13 @@
 const FILE_RE = /^\s*\[file:([A-Za-z0-9_-]+):([^\]]+)\]\s*$/;
 
 /**
- * parseFileMarker(line) → { id, name } when the line is a file marker,
- * otherwise null.
+ * parseFileMarker(line) → { id, name, encodedName } when the line is a file
+ * marker, otherwise null. `encodedName` is the raw second-slot content; in
+ * E2E mode the caller passes it through `decryptName` to recover the
+ * plaintext filename.
  *
  * @param {string} line
- * @returns {{id:string, name:string}|null}
+ * @returns {{id:string, name:string, encodedName:string}|null}
  */
 export function parseFileMarker(line) {
   if (typeof line !== 'string') return null;
@@ -29,7 +33,7 @@ export function parseFileMarker(line) {
   } catch {
     name = m[2];
   }
-  return { id: m[1], name };
+  return { id: m[1], name, encodedName: m[2] };
 }
 
 /**
@@ -42,6 +46,79 @@ export function parseFileMarker(line) {
  */
 export function buildFileMarker(id, name) {
   return `[file:${id}:${encodeURIComponent(String(name == null ? 'file.bin' : name))}]`;
+}
+
+/**
+ * extractMarkerIds(text) → Set<string> of file ids referenced by any marker
+ * embedded in `text`. Order-independent. Used to detect when a peer's edit
+ * introduces a new attachment so the local metadata cache can be refreshed
+ * before the editor renders the marker as "(allegato cifrato)" forever.
+ *
+ * @param {string} text
+ * @returns {Set<string>}
+ */
+export function extractMarkerIds(text) {
+  const ids = new Set();
+  if (typeof text !== 'string') return ids;
+  const re = /\[file:([A-Za-z0-9_-]+):/g;
+  let m;
+  while ((m = re.exec(text)) !== null) ids.add(m[1]);
+  return ids;
+}
+
+/**
+ * extractFileMarkers(text) → parsed file markers found on their own lines,
+ * preserving order. Used to resolve encrypted marker names locally even when
+ * the metadata listing is unavailable.
+ *
+ * @param {string} text
+ * @returns {{id:string, name:string, encodedName:string}[]}
+ */
+export function extractFileMarkers(text) {
+  if (typeof text !== 'string' || text === '') return [];
+  const out = [];
+  for (const line of text.split('\n')) {
+    const marker = parseFileMarker(line);
+    if (marker) out.push(marker);
+  }
+  return out;
+}
+
+/**
+ * resolveFileMarkerName(marker, cryptoKey) → display-safe filename.
+ *
+ * Plain markers return their decoded name immediately. Encrypted markers are
+ * decrypted locally when a key is available; otherwise the placeholder is
+ * returned instead of leaking ciphertext into the UI.
+ *
+ * @param {{name:string, encodedName:string}|null} marker
+ * @param {CryptoKey|null} cryptoKey
+ * @param {string} placeholder
+ * @returns {Promise<string>}
+ */
+export async function resolveFileMarkerName(marker, cryptoKey, placeholder = '(allegato cifrato)') {
+  if (!marker || typeof marker.name !== 'string') return placeholder;
+  if (!isEncryptedName(marker.encodedName)) return marker.name;
+  if (!cryptoKey) return placeholder;
+  try {
+    return await decryptName(cryptoKey, marker.encodedName);
+  } catch {
+    return placeholder;
+  }
+}
+
+/**
+ * buildFileMarkerRaw(id, encodedName) → marker string with `encodedName`
+ * inserted into the name slot as-is (no URL encoding). Used by the E2E
+ * upload path which already produces a base64url-encoded `iv.ct` payload
+ * compatible with the marker grammar.
+ *
+ * @param {string} id
+ * @param {string} encodedName
+ * @returns {string}
+ */
+export function buildFileMarkerRaw(id, encodedName) {
+  return `[file:${id}:${encodedName}]`;
 }
 
 /**

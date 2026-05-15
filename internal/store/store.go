@@ -59,6 +59,9 @@ func OpenWithOptions(path string, opts Options) (*Store, error) {
 		return nil, err
 	}
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
+	if normalized.SecureDelete {
+		dsn += "&_pragma=secure_delete(1)"
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -123,6 +126,12 @@ CREATE TABLE IF NOT EXISTS files (
 		return err
 	}
 	if err := addColumn(`ALTER TABLE files ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'db'`); err != nil {
+		return err
+	}
+	// last_referenced_at records when a file marker was last seen in session
+	// content. Uploads now live for the full session lifetime, but the stamp is
+	// retained for backward-compatible bookkeeping and future diagnostics.
+	if err := addColumn(`ALTER TABLE files ADD COLUMN last_referenced_at INTEGER`); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_slug)`); err != nil {

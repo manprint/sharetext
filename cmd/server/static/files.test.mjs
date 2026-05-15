@@ -1,18 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseFileMarker, buildFileMarker, formatBytes, insertMarkersAtPosition } from './files.js';
+import { generateKey, encryptName } from './crypto.js';
+import {
+  parseFileMarker,
+  buildFileMarker,
+  buildFileMarkerRaw,
+  formatBytes,
+  insertMarkersAtPosition,
+  extractMarkerIds,
+  extractFileMarkers,
+  resolveFileMarkerName,
+} from './files.js';
 
 test('parseFileMarker: valid plain', () => {
-  assert.deepEqual(parseFileMarker('[file:abc123:notes.txt]'), { id: 'abc123', name: 'notes.txt' });
+  assert.deepEqual(parseFileMarker('[file:abc123:notes.txt]'),
+    { id: 'abc123', name: 'notes.txt', encodedName: 'notes.txt' });
 });
 
 test('parseFileMarker: url-encoded name with spaces and special chars', () => {
   const m = parseFileMarker('[file:abc:my%20notes%20%26%20stuff.txt]');
-  assert.deepEqual(m, { id: 'abc', name: 'my notes & stuff.txt' });
+  assert.deepEqual(m,
+    { id: 'abc', name: 'my notes & stuff.txt', encodedName: 'my%20notes%20%26%20stuff.txt' });
 });
 
 test('parseFileMarker: leading/trailing whitespace tolerated', () => {
-  assert.deepEqual(parseFileMarker('   [file:id1:a.txt]   '), { id: 'id1', name: 'a.txt' });
+  assert.deepEqual(parseFileMarker('   [file:id1:a.txt]   '),
+    { id: 'id1', name: 'a.txt', encodedName: 'a.txt' });
+});
+
+test('parseFileMarker: e2e encrypted name slot preserved verbatim', () => {
+  // The encrypted-name shape is `<b64url-iv>.<b64url-ct>`; verify it parses
+  // and the raw slot is exposed for client-side decryption.
+  const m = parseFileMarker('[file:fid:abcDEF_123-xyz.AaBbCc-_QwErTy]');
+  assert.equal(m.id, 'fid');
+  assert.equal(m.encodedName, 'abcDEF_123-xyz.AaBbCc-_QwErTy');
 });
 
 test('parseFileMarker: rejects inline (not whole line)', () => {
@@ -39,7 +60,16 @@ test('buildFileMarker: encodes filename', () => {
 
 test('buildFileMarker: round-trips with parseFileMarker', () => {
   const m = parseFileMarker(buildFileMarker('id42', 'weird:name].txt'));
-  assert.deepEqual(m, { id: 'id42', name: 'weird:name].txt' });
+  assert.equal(m.id, 'id42');
+  assert.equal(m.name, 'weird:name].txt');
+});
+
+test('buildFileMarkerRaw: embeds slot content verbatim (no URL encoding)', () => {
+  const raw = 'iv_part.ct_part';
+  const marker = buildFileMarkerRaw('idX', raw);
+  assert.equal(marker, '[file:idX:iv_part.ct_part]');
+  const m = parseFileMarker(marker);
+  assert.equal(m.encodedName, raw);
 });
 
 test('buildFileMarker: nullish filename → fallback', () => {
@@ -114,4 +144,75 @@ test('insertMarkersAtPosition: every produced marker line is a parseable file ma
   const lines = out.split('\n');
   assert.ok(parseFileMarker(lines[1]));
   assert.ok(parseFileMarker(lines[2]));
+});
+
+test('extractMarkerIds: empty text yields empty set', () => {
+  const ids = extractMarkerIds('');
+  assert.equal(ids.size, 0);
+});
+
+test('extractMarkerIds: single plain marker', () => {
+  const ids = extractMarkerIds('hello\n[file:abc123:notes.txt]\nworld');
+  assert.deepEqual([...ids], ['abc123']);
+});
+
+test('extractMarkerIds: multiple markers, dedup by id', () => {
+  const ids = extractMarkerIds('[file:aaa:x]\n[file:bbb:y]\n[file:aaa:z]');
+  assert.deepEqual([...ids].sort(), ['aaa', 'bbb']);
+});
+
+test('extractMarkerIds: e2e encrypted name slot accepted (regex stops at colon)', () => {
+  // Encrypted name slot is `iv.ct` — base64url + dot + base64url. Regex
+  // captures the id and stops at the colon, regardless of name shape.
+  const ids = extractMarkerIds('[file:abc_DEF-123:AAAA.BBBB]');
+  assert.deepEqual([...ids], ['abc_DEF-123']);
+});
+
+test('extractMarkerIds: inline marker still detected (loose scan)', () => {
+  // Unlike parseFileMarker which requires whole-line, extractMarkerIds is a
+  // loose scan because all we care about is "did a new id show up".
+  const ids = extractMarkerIds('blah [file:abc:x] in the middle');
+  assert.deepEqual([...ids], ['abc']);
+});
+
+test('extractMarkerIds: non-string input → empty set, no throw', () => {
+  assert.equal(extractMarkerIds(null).size, 0);
+  assert.equal(extractMarkerIds(undefined).size, 0);
+  assert.equal(extractMarkerIds(42).size, 0);
+});
+
+test('extractFileMarkers: returns only whole-line markers in order', () => {
+  const text = [
+    'hello',
+    '[file:a:first.txt]',
+    'not [file:inline:nope] inline',
+    '  [file:b:second.txt]  ',
+  ].join('\n');
+  assert.deepEqual(extractFileMarkers(text), [
+    { id: 'a', name: 'first.txt', encodedName: 'first.txt' },
+    { id: 'b', name: 'second.txt', encodedName: 'second.txt' },
+  ]);
+});
+
+test('resolveFileMarkerName: plain marker returns decoded name', async () => {
+  const marker = parseFileMarker('[file:a:my%20notes.txt]');
+  assert.equal(await resolveFileMarkerName(marker, null), 'my notes.txt');
+});
+
+test('resolveFileMarkerName: encrypted marker decrypts with key', async () => {
+  const key = await generateKey();
+  const enc = await encryptName(key, 'secret report.pdf');
+  const marker = parseFileMarker(`[file:a:${enc}]`);
+  assert.equal(await resolveFileMarkerName(marker, key), 'secret report.pdf');
+});
+
+test('resolveFileMarkerName: encrypted marker without key stays placeholder', async () => {
+  const marker = parseFileMarker('[file:a:abcDEF_123.AaBbCc_123]');
+  assert.equal(await resolveFileMarkerName(marker, null), '(allegato cifrato)');
+});
+
+test('resolveFileMarkerName: decrypt failure stays placeholder', async () => {
+  const key = await generateKey();
+  const marker = parseFileMarker('[file:a:not-a-real-payload.AaBb]');
+  assert.equal(await resolveFileMarkerName(marker, key), '(allegato cifrato)');
 });

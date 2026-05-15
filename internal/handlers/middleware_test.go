@@ -38,6 +38,71 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 	}
 }
 
+func TestSecurityHeadersHSTSAppliedBehindProxyHTTPS(t *testing.T) {
+	mw := SecurityHeaders(SecurityHeadersConfig{
+		Enabled:                 true,
+		StrictTransportSecurity: "max-age=31536000; includeSubDomains",
+	})
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if got := w.Header().Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
+		t.Fatalf("HSTS not set behind proxy: %q", got)
+	}
+}
+
+func TestSecurityHeadersHSTSOmittedOnPlainHTTP(t *testing.T) {
+	mw := SecurityHeaders(SecurityHeadersConfig{
+		Enabled:                 true,
+		StrictTransportSecurity: "max-age=31536000",
+	})
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if got := w.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Fatalf("HSTS should not leak on plain HTTP: %q", got)
+	}
+}
+
+func TestIPRateLimiterCreateBucketHonoursBurst(t *testing.T) {
+	// Simulates the dedicated CREATE_RATE_LIMIT bucket attached to POST
+	// /api/sessions in main.go. With burst=2 the same IP gets two allowed
+	// requests in rapid succession, third one is rejected with 429.
+	mw := NewIPRateLimiter(RateLimitConfig{
+		Enabled:           true,
+		RequestsPerSecond: 0.01,
+		Burst:             2,
+		EntryTTL:          time.Minute,
+	})
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+
+	for i := 1; i <= 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/sessions", nil)
+		req.RemoteAddr = "198.51.100.42:4242"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("request %d expected 201, got %d", i, w.Code)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", nil)
+	req.RemoteAddr = "198.51.100.42:4242"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("third request expected 429, got %d", w.Code)
+	}
+}
+
 func TestIPRateLimiterBlocksBurst(t *testing.T) {
 	mw := NewIPRateLimiter(RateLimitConfig{
 		Enabled:           true,

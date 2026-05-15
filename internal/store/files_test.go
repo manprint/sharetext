@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -139,7 +140,7 @@ func TestReferencedFileIDs(t *testing.T) {
 	}
 }
 
-func TestDeleteOrphanFilesUnreferenced(t *testing.T) {
+func TestDeleteOrphanFilesKeepsUnreferencedFilesForLiveSession(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	if _, err := s.Create(ctx, CreateOpts{Slug: "s1"}); err != nil {
@@ -158,22 +159,22 @@ func TestDeleteOrphanFilesUnreferenced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := s.DeleteOrphanFiles(ctx, time.Minute)
+	n, err := s.DeleteOrphanFiles(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("want 1 deleted, got %d", n)
+	if n != 0 {
+		t.Fatalf("live-session uploads must survive cleanup; got %d deleted", n)
 	}
 	if _, err := s.GetFile(ctx, "s1", "keep"); err != nil {
 		t.Fatalf("keep should still exist: %v", err)
 	}
-	if _, err := s.GetFile(ctx, "s1", "drop"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("drop should be gone: %v", err)
+	if _, err := s.GetFile(ctx, "s1", "drop"); err != nil {
+		t.Fatalf("drop should still exist while session is alive: %v", err)
 	}
 }
 
-func TestDeleteOrphanFilesGraceProtectsFreshUploads(t *testing.T) {
+func TestDeleteOrphanFilesKeepsOldUploadsForLiveSession(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	if _, err := s.Create(ctx, CreateOpts{Slug: "s1"}); err != nil {
@@ -182,12 +183,15 @@ func TestDeleteOrphanFilesGraceProtectsFreshUploads(t *testing.T) {
 	if _, err := s.AddFile(ctx, "s1", "fresh", "f.txt", "text/plain", []byte("f")); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.DeleteOrphanFiles(ctx, time.Hour)
+	if _, err := s.db.ExecContext(ctx, `UPDATE files SET created_at = ? WHERE id = ?`, time.Now().Add(-72*time.Hour).Unix(), "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.DeleteOrphanFiles(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
-		t.Fatalf("fresh upload must be protected by grace; got n=%d", n)
+		t.Fatalf("live-session uploads must not age out; got n=%d", n)
 	}
 	if _, err := s.GetFile(ctx, "s1", "fresh"); err != nil {
 		t.Fatalf("fresh should still exist: %v", err)
@@ -212,12 +216,93 @@ func TestDeleteOrphanFilesAfterSessionGoneFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := s.DeleteOrphanFiles(ctx, time.Hour)
+	n, err := s.DeleteOrphanFiles(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
 		t.Fatalf("want 1 deleted (ghost), got %d", n)
+	}
+}
+
+// Files that were referenced and later removed from the editor still belong to
+// the session and must survive until the session itself disappears.
+func TestDeleteOrphanFilesKeepsFormerlyReferencedFileForLiveSession(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, CreateOpts{Slug: "race"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddFile(ctx, "race", "F1", "n.txt", "text/plain", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	// Step 1: PUT content with marker → file_refs(F1) inserted, last_referenced_at set.
+	if _, err := s.Update(ctx, "race", "hello\n[file:F1:n.txt]\nworld"); err != nil {
+		t.Fatal(err)
+	}
+	// Step 2: Stale peer PUT overwrites content without the marker.
+	if _, err := s.Update(ctx, "race", "stale peer content"); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate created_at so the upload-grace path would otherwise nuke it.
+	if _, err := s.db.ExecContext(ctx, `UPDATE files SET created_at = ? WHERE id = ?`,
+		time.Now().Add(-time.Hour).Unix(), "F1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE files SET last_referenced_at = ? WHERE id = ?`,
+		time.Now().Add(-48*time.Hour).Unix(), "F1"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.DeleteOrphanFiles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("live-session file must survive cleanup even after marker removal; got n=%d deleted", n)
+	}
+	if _, err := s.GetFile(ctx, "race", "F1"); err != nil {
+		t.Fatalf("F1 should still exist: %v", err)
+	}
+}
+
+func TestSyncSessionRefsTxStampsLastReferencedAt(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, CreateOpts{Slug: "stamp"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddFile(ctx, "stamp", "F", "n.txt", "text/plain", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	// Before any reference, last_referenced_at is NULL.
+	var ref sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT last_referenced_at FROM files WHERE id = ?`, "F").Scan(&ref); err != nil {
+		t.Fatal(err)
+	}
+	if ref.Valid {
+		t.Fatalf("expected NULL last_referenced_at on fresh upload, got %d", ref.Int64)
+	}
+	// Reference it.
+	if _, err := s.Update(ctx, "stamp", "[file:F:n.txt]"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT last_referenced_at FROM files WHERE id = ?`, "F").Scan(&ref); err != nil {
+		t.Fatal(err)
+	}
+	if !ref.Valid {
+		t.Fatal("expected last_referenced_at populated after first reference")
+	}
+	first := ref.Int64
+	// Wait at least one second so the next Unix timestamp differs.
+	time.Sleep(1100 * time.Millisecond)
+	if _, err := s.Update(ctx, "stamp", "[file:F:n.txt]\nmore"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT last_referenced_at FROM files WHERE id = ?`, "F").Scan(&ref); err != nil {
+		t.Fatal(err)
+	}
+	if !ref.Valid || ref.Int64 < first {
+		t.Fatalf("expected last_referenced_at refreshed on each reference; first=%d now=%v", first, ref)
 	}
 }
 

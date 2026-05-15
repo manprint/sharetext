@@ -55,3 +55,16 @@ export function shouldAutoRelease({ state, lastInputAt, nowMs, idleMs }) {
 export function shouldRequestLock(state) {
   return state === LOCK_STATE_FREE;
 }
+
+/**
+ * Parses the idle-release timeout (ms) shipped by the server through a
+ * `data-idle-release` attribute on <body>. Falls back to `fallback` when the
+ * value is missing or invalid, and floors anything below `minMs` to `minMs`
+ * so a misconfigured server cannot make the editor flap.
+ */
+export function parseIdleReleaseMs(raw, fallback, minMs = 1000) {
+  if (raw === null || raw === undefined || raw === '') return fallback;
+  const n = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(minMs, n);
+}

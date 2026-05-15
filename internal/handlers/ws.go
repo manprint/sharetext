@@ -23,6 +23,14 @@ const (
 	wsTypeRelease   = "lock_release"
 )
 
+// WSReadTimeout caps how long the server will wait for the next WebSocket frame
+// before closing the connection. Defends against slow-loris-style attacks that
+// open a connection and never send anything, tying up goroutines indefinitely.
+// Configurable from main; the default is generous enough that a real client
+// emitting at least a lock_heartbeat each LOCK_TTL/2 (≤ 7.5s by default) keeps
+// the connection alive without bumping into it.
+var WSReadTimeout = 90 * time.Second
+
 type wsMsg struct {
 	Type    string `json:"type,omitempty"`
 	Content string `json:"content,omitempty"`
@@ -40,8 +48,12 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// AllowedOrigins augments the same-origin default. The request Host is
+	// always authorized by the library, so leaving the list empty enforces
+	// strict same-origin and closes the cross-site WebSocket hijacking foot-
+	// gun that `InsecureSkipVerify: true` would have left open.
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
+		OriginPatterns: a.AllowedOrigins,
 	})
 	if err != nil {
 		return
@@ -116,7 +128,9 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for {
-		_, data, err := c.Read(ctx)
+		readCtx, readCancel := context.WithTimeout(ctx, WSReadTimeout)
+		_, data, err := c.Read(readCtx)
+		readCancel()
 		if err != nil {
 			return
 		}

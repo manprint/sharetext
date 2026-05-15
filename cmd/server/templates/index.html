@@ -6,9 +6,12 @@
   <meta name="theme-color" content="#0f766e">
   <title>sharetext</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/icon-180.png">
+  <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <div id="offline-banner" class="offline-banner" hidden>Offline</div>
   <main class="landing">
     <h1>sharetext <span class="app-version">{{version}}</span></h1>
     <p>Condivisione di snippet di testo in tempo reale.</p>
@@ -45,64 +48,12 @@
       <button type="submit" id="create-btn" class="primary">Crea sessione</button>
       <p id="error" class="error" hidden></p>
     </form>
+    <p class="hint privacy-hint">
+      Le sessioni create sono cifrate end-to-end: la chiave vive nella parte dopo <code>#</code> dell'URL
+      e non viene mai inviata al server. Chiunque riceva il link completo può leggere la sessione.
+    </p>
   </main>
 
-  <script>
-    const form = document.getElementById('create-form');
-    const err = document.getElementById('error');
-    const modes = form.querySelectorAll('input[name="type"]');
-    const fields = form.querySelectorAll('.field');
-
-    function syncMode() {
-      const sel = form.querySelector('input[name="type"]:checked').value;
-      fields.forEach(f => {
-        const active = f.dataset.showFor === sel;
-        f.hidden = !active;
-        f.querySelectorAll('input').forEach(inp => { inp.disabled = !active; });
-      });
-    }
-    modes.forEach(m => m.addEventListener('change', syncMode));
-    syncMode();
-
-    form.addEventListener('submit', async (ev) => {
-      ev.preventDefault();
-      err.hidden = true;
-      const type = form.querySelector('input[name="type"]:checked').value;
-      const payload = { type };
-      if (type === 'persistent') {
-        const name = document.getElementById('name').value.trim();
-        if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) {
-          err.textContent = 'Nome non valido. Usa 1-32 caratteri tra lettere, numeri, "-", "_".';
-          err.hidden = false;
-          return;
-        }
-        payload.name = name;
-      } else {
-        const minutes = parseInt(document.getElementById('minutes').value, 10);
-        if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
-          err.textContent = 'Durata non valida. Inserisci un numero di minuti fra 1 e 10080.';
-          err.hidden = false;
-          return;
-        }
-        payload.minutes = minutes;
-      }
-      try {
-        const res = await fetch('/api/sessions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-          const msg = (await res.text()).trim() || 'creazione fallita';
-          throw new Error(msg);
-        }
-        const data = await res.json();
-        window.location.href = data.url;
-      } catch (e) {
-        err.textContent = e.message;
-        err.hidden = false;
-      }
-    });
-  </script>
+  <script type="module" src="/static/create.js"></script>
 </body>
 </html>
