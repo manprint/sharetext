@@ -97,7 +97,6 @@ self.addEventListener("fetch", (event) => {
       event.respondWith(networkFirstShell(req, CACHE.shells));
       return;
     case "api-snapshot":
-    case "api-files":
       event.respondWith(staleWhileRevalidate(req, CACHE.api));
       return;
     case "api-file-blob":

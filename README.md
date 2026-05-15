@@ -545,7 +545,7 @@ L'app è una Progressive Web App installabile: manifest, icone, service worker e
   - **Asset statici** (`/static/*` ad esclusione di `sw.js` e `manifest.webmanifest`) → cache-first.
   - **Shell HTML** (`/`, `/s/{slug}`) → network-first con fallback alla shell cacheata.
   - **Snapshot sessione** (`GET /api/sessions/{slug}`) → stale-while-revalidate.
-  - **Listing file metadata** (`GET /api/sessions/{slug}/files`) → stale-while-revalidate.
+  - **Listing file metadata** (`GET /api/sessions/{slug}/files`) → **passthrough** (no cache). Cachare anche con SWR vorrebbe dire che un upload di un peer apparirebbe come `(allegato cifrato)` su tutti gli altri client finchè non ricaricano: `loadFileMeta` riceverebbe la lista stantia vuota dal SW. La perdita di offline-read della lista file è accettabile rispetto al rischio di nomi sbagliati su upload concorrenti.
   - **Download file binario** (`GET /api/sessions/{slug}/files/{id}`) → cache-first blob.
   - **Bundle ZIP**, **WebSocket upgrade**, **healthz**, **admin**, **scritture (POST/PUT/DELETE)** → passthrough, mai cacheate.
 - Le richieste non classificate restano passthrough; il routing è puro JS testato in `sw-routes.test.mjs` (oltre 15 casi).

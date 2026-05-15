@@ -23,8 +23,11 @@ test("session snapshot GET is SWR-eligible", () => {
   assert.equal(cls("/api/sessions/abc-123"), "api-snapshot");
 });
 
-test("file metadata listing is SWR-eligible", () => {
-  assert.equal(cls("/api/sessions/abc-123/files"), "api-files");
+test("file metadata listing is passthrough (peer uploads must be reflected immediately)", () => {
+  // Critical regression guard: SWR here caused freshly-uploaded attachments
+  // to render as "(allegato cifrato)" on peers because the stale empty list
+  // was served back to loadFileMeta(). Keep it network-only.
+  assert.equal(cls("/api/sessions/abc-123/files"), "passthrough");
 });
 
 test("file blob download is cache-first blob", () => {

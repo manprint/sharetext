@@ -30,7 +30,11 @@
     if (api) {
       const tail = api[2] || "";
       if (tail === "") return "api-snapshot";
-      if (tail === "files") return "api-files";
+      // File metadata changes the moment any peer uploads. Caching it (even
+      // SWR) means a freshly-uploaded attachment appears as "(allegato
+      // cifrato)" on peers until they hard-reload, because loadFileMeta()
+      // gets the empty stale list back. Always go to network.
+      if (tail === "files") return "passthrough";
       if (tail === "bundle") return "passthrough";
       if (tail.startsWith("files/")) return "api-file-blob";
       return "passthrough";
