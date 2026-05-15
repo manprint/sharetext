@@ -21,6 +21,13 @@ import {
   isCiphertext,
   isEncryptedName,
 } from './crypto.js';
+import {
+  decideInitialMode,
+  classifyIncoming,
+  isSafePlaintext,
+  MODE_E2E,
+  MODE_LOCKED,
+} from './e2e-state.js';
 import { downloadZip } from './bundle-client.js';
 import {
   classifyLock,
@@ -126,13 +133,7 @@ function setDecryptBanner(text) {
 }
 
 function determineSessionMode(initialContent) {
-  if (isCiphertext(initialContent)) {
-    sessionMode = cryptoKey ? 'e2e' : 'locked';
-  } else if (initialContent === '' && cryptoKey) {
-    sessionMode = 'e2e';
-  } else {
-    sessionMode = 'plain';
-  }
+  sessionMode = decideInitialMode(initialContent, cryptoKey != null);
 }
 
 async function encryptOutgoing(text) {
@@ -143,29 +144,41 @@ async function encryptOutgoing(text) {
 }
 
 async function decryptIncoming(content) {
-  // Mode is settled at initial snapshot but may need to flip when a peer
-  // changes the session-wide encryption posture afterwards. The session was
-  // empty when we joined? → we picked 'plain' if we had no key, 'e2e' if we
-  // did. If a keyed peer then types, we now see ciphertext arrive in 'plain'
-  // mode and need to react. The reverse (e2e session goes plaintext) is
-  // possible only via a legacy/malicious client; in that case we let the
-  // plaintext through so the user is not stuck with stale ciphertext.
-  if (isCiphertext(content)) {
-    if (cryptoKey) {
-      if (sessionMode !== 'e2e') {
-        sessionMode = 'e2e';
-        applyModeUI();
-      }
-      try { return await decryptText(cryptoKey, content); }
-      catch { return null; }
-    }
-    if (sessionMode !== 'locked') {
-      sessionMode = 'locked';
+  // Side-effect-free classification — see e2e-state.js. Modes may flip when a
+  // peer's encryption posture changes mid-session: an empty session opened
+  // 'plain' (no key) reactively becomes 'locked' the moment a keyed peer
+  // writes; an empty 'e2e' session stays 'e2e' through the first remote
+  // ciphertext. Pinned by e2e-state.test.mjs.
+  const decision = classifyIncoming(content, cryptoKey != null, sessionMode);
+  if (decision.kind === 'plain') {
+    return decision.plain;
+  }
+  if (decision.kind === 'locked') {
+    if (sessionMode !== MODE_LOCKED) {
+      sessionMode = MODE_LOCKED;
       applyModeUI();
     }
     return null;
   }
-  return content;
+  // decrypt-attempt
+  if (sessionMode !== MODE_E2E) {
+    sessionMode = MODE_E2E;
+    applyModeUI();
+  }
+  let plain;
+  try {
+    plain = await decryptText(cryptoKey, content);
+  } catch {
+    return null;
+  }
+  // Defense-in-depth: decryptText returning a ciphertext-prefixed string is
+  // impossible by construction, but if a future bug ever made it possible,
+  // refusing to surface it keeps `enc:v1:…` out of the editor.
+  if (!isSafePlaintext(plain)) {
+    console.error('decryptIncoming: decrypted output still looks like ciphertext; refusing');
+    return null;
+  }
+  return plain;
 }
 
 // Serialise async snapshot/edit applies so a faster second message doesn't
@@ -362,6 +375,15 @@ async function applyRemote(rawContent, { initialSnapshot = false } = {}) {
     // Locked mode or decrypt failure: keep the editor empty so the user never
     // sees raw ciphertext, and don't disturb pending local state (there
     // shouldn't be any since we forced readOnly).
+    return false;
+  }
+  // Last line of defense before we touch the editor. Pinned by tests.
+  if (!isSafePlaintext(plain)) {
+    console.error('applyRemote: refused to render ciphertext-shaped string');
+    if (sessionMode !== MODE_LOCKED) {
+      sessionMode = MODE_LOCKED;
+      applyModeUI();
+    }
     return false;
   }
   if (!shouldApplyRemoteContent({

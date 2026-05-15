@@ -560,6 +560,8 @@ L'app è una Progressive Web App installabile: manifest, icone, service worker e
 
 Le risorse cacheate dal service worker sono opache: testo cifrato resta cifrato anche nella cache. La decifratura avviene client-side post-`fetch`/post-`match`, quindi il SW non altera né legge il plaintext.
 
+**Attenzione su cache del SW e versioning.** Il SW cachea `app.js`, `crypto.js`, `e2e-state.js` con strategia *cache-first* (vedi `sw-routes.js`). Quando si rilascia un fix lato JS (in particolare al pipeline di decifratura) è **obbligatorio bumpare `internal/version/version.go`**, perché il nome cache è `static-{Version}`: senza bump i browser continuano a servire l'`app.js` cacheato e il fix non entra mai in vigore. Il primo commit dopo questa regressione ha bumpato `v1.1.0 → v1.1.1` esattamente per questo motivo.
+
 ---
 
 ## Admin
@@ -851,6 +853,7 @@ just vet            # go vet
 - `commands.test.mjs`: `findSlashTokenAtCaret` (token a fine buffer / dopo whitespace / a inizio riga, prefissi parziali, URL e path interni rifiutati, caret in mezzo a un token, clamp out-of-range, non-string), `filterCommands` (match prefisso case-insensitive), `formatTimestamp` (zero padding, valori massimi, default `now`), registry (`registerCommand` validazione + handler async, `dispatchCommand` happy/unknown/missing-ctx).
 - `crypto.test.mjs`: roundtrip `encryptText`/`decryptText`, unicità IV su due encrypt dello stesso plaintext, ciphertext-su-empty-string conserva prefisso `enc:v1:`, tampering byte → `OperationError`, roundtrip binario via `encryptBytes`/`decryptBytes`, encoding nome cifrato (`encryptName`/`decryptName`), `isCiphertext`/`isEncryptedName` discrimination.
 - `bundle-client.test.mjs`: builder ZIP STORE method (no compressione) per sessioni E2E — build + parsing entries via `DecompressionStream` di un consumer-side, dedup nomi duplicati, bytes integrity.
+- `e2e-state.test.mjs`: state machine pura della cifratura (decideInitialMode, classifyIncoming, isSafePlaintext). Pinning specifico contro la regressione "ciphertext nell'editor" che si è verificata in produzione (8 casi di transizione + guardia anti-leak su valori che iniziano per `enc:v1:`). Garantisce che il path di rendering rifiuti qualunque stringa cifrata anche se un futuro bug aggirasse la decifratura.
 - `linkify.test.mjs`: rendering anchor con `rel="noopener noreferrer" target="_blank"`, scheme http/https only, evita falsi positivi e URL troncati.
 - `lock.test.mjs`: stati `classifyLock`, `canEditNow`, `shouldRequestLock`, `nextHeartbeatDelayMs` (half-TTL clamp min/max, fallback senza expiry), `shouldAutoRelease` (idle gating), `parseIdleReleaseMs` (fallback su input invalido, clamp a `minMs`).
 - `sync.test.mjs`: `shouldApplyRemoteContent` (apply su delta vivente, ignora snapshot iniziale con changes pending, ignora content uguale) e `shouldFlushPendingLocalChanges` (flush solo dopo l'initial snapshot).
@@ -903,6 +906,7 @@ cmd/server/
     create.js              landing form: genera AES key client-side, appende #k=… al redirect
     crypto.js              wrapper Web Crypto AES-256-GCM (encrypt/decrypt text/bytes/name)
     bundle-client.js       ZIP builder client-side (STORE) per sessioni E2E
+    e2e-state.js           state machine pura E2E (modes, classify incoming, guard anti-leak)
     blocks.js              parser blocchi (`-----`)
     countdown.js           helpers countdown (formattazione, msUntil, isExpired)
     download.js            helpers download client-side (sanitize filename, blob trigger)
@@ -915,7 +919,7 @@ cmd/server/
     sw-routes.js           classificazione richieste service worker (testabile)
     admin.js               client admin: list, delete, mobile cards
     *.test.mjs             node:test (blocks, bundle-client, commands, countdown, crypto, download,
-                           files, linkify, lock, offline-guard, sw-routes, sync)
+                           e2e-state, files, linkify, lock, offline-guard, sw-routes, sync)
 internal/
   session/                 slug crypto-random + validazione nome
   store/
