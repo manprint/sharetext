@@ -30,7 +30,13 @@
   <main id="session" class="session">
     <div class="pane edit">
       <label for="content" class="label">Editor</label>
-      <textarea id="content" spellcheck="false" placeholder="Incolla qui il testo da condividere..."></textarea>
+      <div class="editor-body">
+        <div id="line-numbers" class="line-numbers" aria-hidden="true"><span class="line-number">1</span></div>
+        <div class="editor-input">
+          <textarea id="content" spellcheck="false" wrap="soft" placeholder="Incolla qui il testo da condividere..."></textarea>
+          <div id="editor-measure" class="editor-measure" aria-hidden="true"></div>
+        </div>
+      </div>
     </div>
     <div class="pane view">
       <label class="label">Righe</label>

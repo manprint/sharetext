@@ -1,4 +1,5 @@
-import { parseBlocks } from './blocks.js';
+import { logicalLineLabels, logicalLineStarts, parseBlocks } from './blocks.js';
+import { anchoredScrollTop } from './editor.js';
 import { appendLinkified } from './linkify.js';
 import { formatRemaining, msUntil, isExpired } from './countdown.js';
 import { buildFilename, downloadText } from './download.js';
@@ -55,6 +56,8 @@ import { rememberPinnedSession } from './pinning.js';
 
 const slug = document.body.dataset.slug;
 const $content = document.getElementById('content');
+const $lineNumbers = document.getElementById('line-numbers');
+const $editorMeasure = document.getElementById('editor-measure');
 const $lines = document.getElementById('lines');
 const $status = document.getElementById('status');
 const $copyAll = document.getElementById('copy-all');
@@ -75,12 +78,20 @@ const IDLE_RELEASE_MS = parseIdleReleaseMs(document.body.dataset.idleRelease, 30
 
 function setEditing(on) {
   if (!$session || !$toggleView) return;
+  const source = on ? $lines : $content;
+  const target = on ? $content : $lines;
+  const sourceAnchors = on ? rowsScrollAnchors() : editorScrollAnchors();
+  const sourceScrollTop = source.scrollTop;
   $session.classList.toggle('editing', on);
   $toggleView.textContent = on ? 'Righe' : 'Modifica';
   $toggleView.setAttribute('aria-pressed', String(on));
-  if (on) {
-    requestAnimationFrame(() => { try { $content.focus({ preventScroll: true }); } catch {} });
-  }
+  if (on) updateEditorLineMetrics();
+  requestAnimationFrame(() => {
+    const targetAnchors = on ? editorScrollAnchors() : rowsScrollAnchors();
+    target.scrollTop = anchoredScrollTop(sourceScrollTop, sourceAnchors, targetAnchors);
+    $lineNumbers.scrollTop = $content.scrollTop;
+    if (on) { try { $content.focus({ preventScroll: true }); } catch {} }
+  });
 }
 
 if ($toggleView) {
@@ -110,6 +121,9 @@ let heartbeatTimer = null;
 let idleTimer = null;
 let pendingUploadOffset = null;
 let isOffline = false;
+let editorLogicalLineStarts = [0];
+let editorLineOffsets = [0];
+let editorMeasureScheduled = false;
 
 // End-to-end encryption mode. 'pending' until the first snapshot lands, then
 // fixed: 'plain' for legacy sessions, 'e2e' once we know the key matches the
@@ -242,12 +256,59 @@ async function copyText(text) {
   }
 }
 
+function updateEditorLineMetrics() {
+  $editorMeasure.style.width = `${$content.clientWidth}px`;
+  const measureLines = Array.from($editorMeasure.children);
+  const numberLines = Array.from($lineNumbers.children);
+  const lineHeight = parseFloat(getComputedStyle($content).lineHeight);
+  let offset = 0;
+  editorLineOffsets = measureLines.map((line, index) => {
+    const top = offset;
+    const height = Math.max(lineHeight, line.getBoundingClientRect().height);
+    if (numberLines[index]) numberLines[index].style.height = `${height}px`;
+    offset += height;
+    return top;
+  });
+}
+
+function scheduleEditorLineMetrics() {
+  if (editorMeasureScheduled) return;
+  editorMeasureScheduled = true;
+  queueMicrotask(() => {
+    editorMeasureScheduled = false;
+    updateEditorLineMetrics();
+  });
+}
+
+function renderEditorLineNumbers(text) {
+  const labels = logicalLineLabels(text);
+  const physicalLines = text === '' ? [''] : text.split('\n');
+  const numberFragment = document.createDocumentFragment();
+  const measureFragment = document.createDocumentFragment();
+  labels.forEach((label, index) => {
+    const number = document.createElement('span');
+    number.className = 'line-number';
+    number.textContent = label;
+    numberFragment.appendChild(number);
+
+    const measure = document.createElement('div');
+    measure.className = 'editor-measure-line';
+    measure.textContent = physicalLines[index] || ' ';
+    measureFragment.appendChild(measure);
+  });
+  $lineNumbers.replaceChildren(numberFragment);
+  $editorMeasure.replaceChildren(measureFragment);
+  updateEditorLineMetrics();
+}
+
 function renderItems(text) {
+  renderEditorLineNumbers(text);
+  editorLogicalLineStarts = logicalLineStarts(text);
   $lines.innerHTML = '';
   const items = parseBlocks(text);
   if (items.length === 0) {
     const li = document.createElement('li');
-    li.innerHTML = '<span class="txt empty">(vuoto)</span>';
+    li.innerHTML = '<span class="num">1</span><span class="txt empty">(vuoto)</span>';
     $lines.appendChild(li);
     return;
   }
@@ -980,6 +1041,49 @@ $content.addEventListener('input', () => {
   debounceTimer = setTimeout(() => send($content.value), 250);
   updateCommandMenu();
 });
+
+let scrollSyncLocked = false;
+function editorScrollAnchors() {
+  const maxScroll = Math.max(0, $content.scrollHeight - $content.clientHeight);
+  const anchors = editorLogicalLineStarts.map((line) => Math.min(maxScroll, editorLineOffsets[line] || 0));
+  anchors.push(maxScroll);
+  return anchors;
+}
+
+function rowsScrollAnchors() {
+  const rows = Array.from($lines.children);
+  const maxScroll = Math.max(0, $lines.scrollHeight - $lines.clientHeight);
+  const firstOffset = rows.length === 0 ? 0 : rows[0].offsetTop;
+  const anchors = rows.map((row) => Math.min(maxScroll, Math.max(0, row.offsetTop - firstOffset)));
+  anchors.push(maxScroll);
+  return anchors;
+}
+
+function syncPaneScroll(source, target) {
+  if (scrollSyncLocked || source.clientHeight === 0 || target.clientHeight === 0) return;
+  scrollSyncLocked = true;
+  const editorAnchors = editorScrollAnchors();
+  const rowsAnchors = rowsScrollAnchors();
+  target.scrollTop = source === $content
+    ? anchoredScrollTop(source.scrollTop, editorAnchors, rowsAnchors)
+    : anchoredScrollTop(source.scrollTop, rowsAnchors, editorAnchors);
+  requestAnimationFrame(() => { scrollSyncLocked = false; });
+}
+
+$content.addEventListener('scroll', () => {
+  $lineNumbers.scrollTop = $content.scrollTop;
+  syncPaneScroll($content, $lines);
+});
+
+$lines.addEventListener('scroll', () => {
+  syncPaneScroll($lines, $content);
+  $lineNumbers.scrollTop = $content.scrollTop;
+});
+
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(scheduleEditorLineMetrics).observe($content);
+}
+window.addEventListener('resize', scheduleEditorLineMetrics);
 
 window.addEventListener('beforeunload', () => {
   if (lockState === LOCK_STATE_MINE) {
