@@ -312,8 +312,44 @@ button.ghost:hover { background: var(--row-hover); color: var(--fg); }
   background: var(--bg);
 }
 
-textarea#content {
+.editor-body {
   flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.line-numbers {
+  flex: 0 0 auto;
+  min-width: 3.25rem;
+  padding: 0.75rem 0.6rem;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  text-align: right;
+  user-select: none;
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.line-number {
+  display: block;
+}
+
+.editor-input {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+textarea#content {
+  display: block;
+  width: 100%;
+  height: 100%;
   border: 0;
   outline: 0;
   resize: none;
@@ -321,7 +357,25 @@ textarea#content {
   font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   background: white;
   color: var(--fg);
-  width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-x: hidden;
+}
+
+.editor-measure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+  padding: 0.75rem;
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.editor-measure-line {
+  min-height: 1.5em;
 }
 
 .lines {
@@ -544,6 +598,8 @@ button.danger:hover { background: #fef2f2; }
   .pane { border-radius: 6px; }
 
   textarea#content { font-size: 16px; padding: 0.6rem; } /* iOS no-zoom */
+  .line-numbers { min-width: 3rem; padding: 0.6rem 0.5rem; font-size: 16px; }
+  .editor-measure { padding: 0.6rem; font-size: 16px; }
   .lines { font-size: 14px; }
   .lines li { padding: 0.45rem 0.5rem 0.45rem 0.6rem; gap: 0.4rem; }
   .lines .num { width: 2em; }

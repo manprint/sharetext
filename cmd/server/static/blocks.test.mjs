@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBlocks } from './blocks.js';
+import { logicalLineLabels, logicalLineStarts, parseBlocks } from './blocks.js';
 
 test('empty input → empty list', () => {
   assert.deepEqual(parseBlocks(''), []);
@@ -97,4 +97,19 @@ test('round-trip example from spec', () => {
   assert.equal(got.length, 1);
   assert.equal(got[0].type, 'block');
   assert.equal(got[0].text, 'services:\n  sharetext:\n    build: .');
+});
+
+test('logical line labels match plain rows', () => {
+  assert.deepEqual(logicalLineLabels(''), ['1']);
+  assert.deepEqual(logicalLineLabels('a\nb\nc'), ['1', '2', '3']);
+});
+
+test('logical line labels collapse matched blocks like the rows view', () => {
+  const text = 'before\n-----\nfoo\nbar\n-----\nafter';
+  assert.deepEqual(logicalLineLabels(text), ['1', '2', '', '', '', '3']);
+  assert.deepEqual(logicalLineStarts(text), [0, 1, 5]);
+});
+
+test('logical line labels count unmatched delimiters as rows', () => {
+  assert.deepEqual(logicalLineLabels('before\n-----\nstuff'), ['1', '2', '3']);
 });
