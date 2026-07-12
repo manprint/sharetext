@@ -264,7 +264,11 @@ function updateEditorLineMetrics() {
   let offset = 0;
   editorLineOffsets = measureLines.map((line, index) => {
     const top = offset;
-    const height = Math.max(lineHeight, line.getBoundingClientRect().height);
+    // offsetHeight stays in layout (CSS) pixels. getBoundingClientRect() is
+    // affected by the mobile `zoom`, so feeding its value back into a CSS
+    // height would apply the zoom twice and progressively misalign wrapped
+    // lines from the textarea.
+    const height = Math.max(lineHeight, line.offsetHeight);
     if (numberLines[index]) numberLines[index].style.height = `${height}px`;
     offset += height;
     return top;
@@ -274,9 +278,13 @@ function updateEditorLineMetrics() {
 function scheduleEditorLineMetrics() {
   if (editorMeasureScheduled) return;
   editorMeasureScheduled = true;
-  queueMicrotask(() => {
+  requestAnimationFrame(() => {
     editorMeasureScheduled = false;
     updateEditorLineMetrics();
+    // Mobile browsers scroll the textarea to its caret after the input event.
+    // Synchronise only now, once both that scroll and any lock-badge reflow
+    // have settled for this frame.
+    $lineNumbers.scrollTop = $content.scrollTop;
   });
 }
 
@@ -298,7 +306,7 @@ function renderEditorLineNumbers(text) {
   });
   $lineNumbers.replaceChildren(numberFragment);
   $editorMeasure.replaceChildren(measureFragment);
-  updateEditorLineMetrics();
+  scheduleEditorLineMetrics();
 }
 
 function renderItems(text) {
