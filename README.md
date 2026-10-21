@@ -269,14 +269,14 @@ ADMIN_PASS_HASH=$2a$12$...
 |-----------|---------|---------|-------------------|
 | `LOCK_TTL` | `15s` | Durata massima del lock editor senza heartbeat. | Se troppo basso, i tab mobile/background possono perdere il lock troppo facilmente. |
 | `LOCK_IDLE_RELEASE` | `3s` | Tempo di inattivita' oltre il quale il client rilascia spontaneamente il lock. | Se lo alzi, chi smette di scrivere tiene il lock più a lungo. |
-| `WS_READ_TIMEOUT` | `90s` | Timeout massimo di lettura per la WebSocket. | Protegge da connessioni idle o slow-loris; non abbassarlo troppo. |
+| `WS_READ_TIMEOUT` | `90s` | Finestra di liveness della WebSocket: il server manda un ping ogni `WS_READ_TIMEOUT/2` e chiude il peer che non risponde. | Protegge da peer morti e slow-loris; i viewer idle restano connessi (il browser risponde ai ping da solo). |
 
 ### Limiti contenuto e allegati
 
 | Variabile | Default | Cosa fa | Impatto operativo |
 |-----------|---------|---------|-------------------|
-| `MAX_FILE_SIZE` | `10485760` | Limite massimo per singolo file uploadato. | Oltre questo valore l'upload fallisce con `413`. |
-| `MAX_CONTENT_SIZE` | `6291456` | Limite massimo del contenuto testuale della sessione. | Vale su `PUT` e WebSocket. In sessioni cifrate considera l'overhead del ciphertext. |
+| `MAX_FILE_SIZE` | `10485760` | Limite massimo per singolo file uploadato. | Oltre questo valore l'upload fallisce con `413`. `0` o valori invalidi → default. |
+| `MAX_CONTENT_SIZE` | `6291456` | Limite massimo del contenuto testuale della sessione (byte). | Vale su `PUT` e WebSocket. In sessioni cifrate considera l'overhead del ciphertext. `0` o valori invalidi → default. |
 | `MAX_FILES_PER_SESSION` | `256` | Numero massimo di allegati per sessione. | `0` disabilita il limite. |
 | `MAX_SESSION_STORAGE_BYTES` | `104857600` | Quota totale sessione: testo + allegati. | `0` disabilita il limite; utile per evitare che una singola sessione saturi il nodo. |
 
@@ -546,13 +546,13 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 - **`PRAGMA secure_delete=ON`** per evitare residui leggibili nelle pagine libere SQLite.
 - **CSP stretta** di default (no `'unsafe-inline'` su `script-src`), `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Permissions-Policy` minimale. Link nel testo emessi con `rel="noopener noreferrer"` per non leakare il fragment.
 - **Rate limit** per-IP separato per route pubblici, admin e creazione sessioni (`POST /api/sessions`, bucket dedicato più stretto contro flood).
-- **WebSocket read deadline** (`WS_READ_TIMEOUT`, default `90s`) chiude le connessioni idle e protegge da slow-loris su upgrade.
+- **WebSocket liveness** (`WS_READ_TIMEOUT`, default `90s`): ping periodici, il peer che non risponde viene chiuso (difesa da slow-loris e connessioni morte) senza disconnettere chi guarda soltanto.
 - **Bcrypt admin hash validato a startup**: hash malformato → fail-fast, niente silent disable.
 
 **PWA**
 
 - Installabile come app: manifest, icone, service worker.
-- Service worker cache-first per asset statici, network-first per shell HTML, stale-while-revalidate per snapshot/listing, cache-first per blob file.
+- Service worker cache-first per asset statici (tutti i moduli precaricati), network-first per shell HTML e snapshot sessione, cache-first per blob file.
 - Banner "Offline — sola lettura" + offline guard che blocca scrittura e disabilita upload quando il network è down.
 - Cache versionata per `version.Version`: nuovo deploy ⇒ cache invalidata su `activate`.
 
@@ -621,9 +621,9 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 | `VACUUM_INTERVAL` | `0s` (off) | Frequenza `VACUUM` SQLite + `wal_checkpoint(TRUNCATE)` per reclaim spazio. `0` o vuoto = disabilitato. |
 | `LOCK_TTL` | `15s` | TTL del lock di modifica editor. Un client che detiene il lock deve inviare un heartbeat entro questo intervallo, altrimenti il server libera il lock e un altro utente puo' acquisirlo. Minimo accettato: `1s`. |
 | `LOCK_IDLE_RELEASE` | `3s` | Tempo di inattività dopo cui il client che detiene il lock lo rilascia spontaneamente, così che un altro utente possa prendere il turno. Il valore viene servito al browser via attributo `data-idle-release` su `<body>`. Minimo accettato: `1s`; valori più piccoli vengono ignorati e si ricade sul default. |
-| `WS_READ_TIMEOUT` | `90s` | Tempo massimo che il server attende un nuovo frame WebSocket prima di chiudere la connessione. Difende da slow-loris-like su connessioni upgraded: una connessione idle senza heartbeat o input viene chiusa quando il timeout scatta. Minimo accettato: `1s`. Tipicamente non serve toccarlo: i client `app.js` inviano heartbeat ogni `LOCK_TTL/2`, ben sotto il default. |
-| `MAX_FILE_SIZE` | `10485760` | Limite massimo upload per singolo file in byte. Default 10 MiB. |
-| `MAX_CONTENT_SIZE` | `6291456` | Limite massimo del contenuto testuale di sessione in byte. Vale per `PUT` e WebSocket. Il default (6 MiB) lascia spazio all'inflazione ~34% del ciphertext AES-GCM base64, mantenendo la capacità plaintext effettiva attorno ai 4 MiB. |
+| `WS_READ_TIMEOUT` | `90s` | Finestra di liveness della WebSocket. Il server invia un ping ogni `WS_READ_TIMEOUT/2` e chiude la connessione se il pong non arriva entro altrettanto: difende da slow-loris e da peer spariti senza chiudere (rete caduta, tab congelata dal sistema). I ping sono gestiti dallo stack WebSocket del browser, quindi un viewer che non scrive nulla resta connesso. Minimo accettato: `1s`. |
+| `MAX_FILE_SIZE` | `10485760` | Limite massimo upload per singolo file in byte. Default 10 MiB. `0` o valori invalidi → default. |
+| `MAX_CONTENT_SIZE` | `6291456` | Limite massimo del contenuto testuale di sessione in byte. Vale per `PUT` e WebSocket. Il default (6 MiB) lascia spazio all'inflazione ~34% del ciphertext AES-GCM base64, mantenendo la capacità plaintext effettiva attorno ai 4 MiB. `0` o valori invalidi → default. |
 | `MAX_FILES_PER_SESSION` | `256` | Numero massimo di allegati per sessione. `0` disabilita il limite. |
 | `MAX_SESSION_STORAGE_BYTES` | `104857600` | Quota massima complessiva per sessione: `len(content) + somma(size files)`. `0` disabilita il limite. |
 | `FILE_STORAGE_BACKEND` | `db` | Backend allegati: `db` (BLOB in SQLite) oppure `fs` (filesystem). |
@@ -736,16 +736,20 @@ Stream JSON bidirezionale. Connessione rifiutata con `404` se lo slug non esiste
 
 Successivi `session payload` (broadcast su edit) hanno lo stesso shape ma senza `client_id`. Eventi tipizzati:
 
-- `{"type": "lock", "lock": {...}}` — emesso quando lo stato del lock cambia (acquisito, rilasciato, transito di holder).
-- `{"type": "lock_denied", "lock": {...}}` — inviato solo al chiamante quando un suo write/acquire e' stato rifiutato perche' il lock e' di un altro utente. Il payload `lock` riporta il detentore attuale.
+- `{"type": "lock", "lock": {...}}` — emesso a tutta la stanza quando il lock cambia mano (acquisito, rilasciato, scaduto per TTL), nell'ordine esatto in cui le transizioni avvengono. Inviato anche al solo chiamante come risposta a `lock_heartbeat` (con la nuova `expires_at`) e a un `lock_acquire` di chi detiene gia' il lock.
+- `{"type": "lock_denied", "lock": {...}, "seq": n}` — inviato solo al chiamante quando un suo write/acquire/heartbeat e' stato rifiutato perche' il lock non e' suo. Il payload `lock` riporta il detentore attuale; `seq` e' presente se il messaggio rifiutato era un `edit` con `seq`.
+- `{"type": "ack", "seq": n}` — l'`edit` con quel `seq` e' stato salvato.
+- `{"type": "edit_rejected", "error": "...", "seq": n}` — l'`edit` non e' stato salvato per un motivo diverso dal lock (es. quota `MAX_SESSION_STORAGE_BYTES`).
+
+Ogni `edit` riceve esattamente una risposta (`ack`, `edit_rejected` o `lock_denied`), nell'ordine di invio: il client sa cosa ha il server e, se la connessione cade prima della risposta, re-invia il testo dopo la riconnessione. Il `lock` incluso nei session payload di broadcast e' informativo; fanno fede lo snapshot iniziale e gli eventi `lock`.
 
 **Client → server**:
 
 | Messaggio | Effetto |
 |-----------|---------|
-| `{"type": "edit", "content": "..."}` (o legacy `{"content": "..."}`) | Acquisisce auto-il lock per il `client_id` corrente e applica il contenuto. Rifiutato con `lock_denied` se un altro client detiene il lock. |
+| `{"type": "edit", "content": "...", "seq": n}` (o legacy `{"content": "..."}`) | Acquisisce auto-il lock per il `client_id` corrente e applica il contenuto. Risposta `ack`, `edit_rejected` o `lock_denied` (se un altro client detiene il lock); `seq` (opzionale, scelto dal client) viene ripetuto nella risposta. |
 | `{"type": "lock_acquire"}` | Richiesta esplicita di acquisizione. Idempotente per il detentore. Rifiutata con `lock_denied` se occupato. |
-| `{"type": "lock_heartbeat"}` | Rinnova il TTL del lock. Inviato dal client che detiene il lock ad intervalli `<= LOCK_TTL/2`. Rifiutato con `lock_denied` se il chiamante non e' il detentore. |
+| `{"type": "lock_heartbeat"}` | Rinnova il TTL del lock. Inviato dal client che detiene il lock ad intervalli `<= LOCK_TTL/2`. Risposta `lock` con la nuova scadenza, oppure `lock_denied` se il chiamante non e' il detentore. |
 | `{"type": "lock_release"}` | Rilascia il lock se chi parla e' il detentore. No-op altrimenti. Trigger un evento `lock` con `held: false`. |
 
 Sul disconnect (qualsiasi causa) il server rilascia automaticamente l'eventuale lock detenuto dal client e fa broadcast dello stato libero.
@@ -880,9 +884,9 @@ Le operazioni di **scrittura** (edit testuale, upload file, drag&drop) sono mutu
 ### Garanzie
 
 - **Mutua esclusione**: il `LockManager` server-side serializza acquisizione/heartbeat/release sotto un singolo `sync.Mutex`. Due richieste concorrenti vedono esiti coerenti, mai entrambe "granted".
-- **Anti-stallo**: il TTL evita che un client morto blocchi la sessione. Se un client perde connettivita' senza chiudere pulitamente, il lock si libera in `<= LOCK_TTL` e il prossimo writer puo' acquisire.
+- **Anti-stallo**: il TTL evita che un client morto blocchi la sessione. Se un client perde connettivita' senza chiudere pulitamente (o la sua tab viene congelata), il lock si libera in `<= LOCK_TTL` e la scadenza viene annunciata subito a tutta la stanza con un evento `lock`, cosi' gli altri tornano a poter scrivere senza aspettare un'altra azione.
 - **Server source-of-truth**: il client si fida sempre dell'ultimo `lock` event ricevuto. Se un client locale crede di detenere il lock ma il server l'ha gia' rilasciato (es. heartbeat saltato per throttling background-tab), il prossimo write tornera' `lock_denied` e l'UI si riallinea.
-- **Rollback su denial**: se un client perde il lock mentre ha modifiche locali in flight, l'editor viene ripristinato all'ultimo contenuto confermato dal server (per evitare ghost text che i peer non vedono mai).
+- **Rollback su denial**: se un client perde il lock mentre ha modifiche locali non salvate (non ancora inviate, o rifiutate con `lock_denied`), l'editor viene ripristinato all'ultimo contenuto confermato dal server (snapshot, update di un peer o `ack` di un proprio edit), per evitare ghost text che i peer non vedono mai.
 
 ### Codici di errore
 
@@ -994,9 +998,9 @@ L'app è una Progressive Web App installabile: manifest, icone, service worker e
 - Generato a partire da `cmd/server/sw.js.tmpl`, servito su `/sw.js` con `Service-Worker-Allowed: /` e `Cache-Control: no-cache` (il byte-diff su deploy nuovo triggera install+activate del nuovo SW).
 - Cache name versionata su `internal/version.Version`: ogni release evict completamente le cache precedenti in `activate`.
 - Strategie di routing (definite in `static/sw-routes.js`, riusabili e testate):
-  - **Asset statici** (`/static/*` ad esclusione di `sw.js` e `manifest.webmanifest`) → cache-first.
+  - **Asset statici** (`/static/*` ad esclusione di `sw.js` e `manifest.webmanifest`) → cache-first. Tutti i moduli JS sono in `PRECACHE_URLS` (verificato da `cmd/server/sw_test.go`): un modulo mancante farebbe fallire offline l'intero grafo di import.
   - **Shell HTML** (`/`, `/s/{slug}`, `/launch/{slug}`) → network-first con fallback alla shell cacheata.
-  - **Snapshot sessione** (`GET /api/sessions/{slug}`) → stale-while-revalidate.
+  - **Snapshot sessione** (`GET /api/sessions/{slug}`) → network-first con fallback alla copia cacheata solo se la rete non risponde; `404`/`410` eliminano la copia. Il client interroga lo snapshot prima di ogni riconnessione: servirlo dalla cache resusciterebbe sessioni cancellate (riconnessione infinita invece dell'overlay).
   - **Listing file metadata** (`GET /api/sessions/{slug}/files`) → **passthrough** (no cache). Cachare anche con SWR vorrebbe dire che un upload di un peer apparirebbe come `(allegato cifrato)` su tutti gli altri client finchè non ricaricano: `loadFileMeta` riceverebbe la lista stantia vuota dal SW. La perdita di offline-read della lista file è accettabile rispetto al rischio di nomi sbagliati su upload concorrenti.
   - **Download file binario** (`GET /api/sessions/{slug}/files/{id}`) → cache-first blob.
   - **Bundle ZIP**, **WebSocket upgrade**, **healthz**, **admin**, **scritture (POST/PUT/DELETE)** → passthrough, mai cacheate.
@@ -1291,11 +1295,12 @@ just vet            # go vet
 - `internal/handlers`:
   - API sessioni (httptest): persistent/temporary validi e invalidi (400), 410 su scaduta su GET e PUT;
   - hub broadcast / except / leave;
-  - WebSocket end-to-end con 2 client + slug inesistente + origin foreign rifiutato (403) + same-host accettato (101) + read deadline che chiude la connessione idle (`WS_READ_TIMEOUT`);
+  - WebSocket end-to-end con 2 client + slug inesistente + origin foreign rifiutato (403) + same-host accettato (101) + viewer idle che sopravvive a `WS_READ_TIMEOUT` + peer che non risponde ai ping chiuso + `ack`/`edit_rejected`/`lock_denied` con `seq` + risposta agli heartbeat + scadenza del lock annunciata + admin delete che disconnette la stanza;
   - admin: missing/wrong creds (401), creds vuote (503), list (200 con esclusione scaduti, total_size con files), delete (200 + 404 idempotenza), delete unauthorized; branch bcrypt (`ADMIN_PASS_HASH`) valido e invalido, timing-safe;
   - middleware: HSTS applicato su `X-Forwarded-Proto: https`; rate limiter blocca burst per-IP, scenario dedicato `POST /api/sessions` (`CREATE_RATE_LIMIT_*`) per resistenza al flood;
   - file: upload happy/missing/unknown/oversize (413), download (binary + Content-Disposition), list, bundle ZIP (verificato letto via `archive/zip`, dedup nomi duplicati);
-  - lock: acquire/release/heartbeat, denial cross-client, auto-release su disconnect.
+  - lock: acquire/release/heartbeat, denial cross-client, auto-release su disconnect, eventi di transizione ordinati e coerenti con lo stato finale sotto concorrenza, timer di scadenza (heartbeat che la posticipa, riacquisizione non liberata dal vecchio timer);
+  - store: scrittori concorrenti senza `SQLITE_BUSY` (transazioni `IMMEDIATE`), quota in byte e non in caratteri, cancellazione della directory FS della sessione.
 
 ### JS (`node:test`)
 
@@ -1309,10 +1314,12 @@ just vet            # go vet
 - `e2e-state.test.mjs`: state machine pura della cifratura (decideInitialMode, classifyIncoming, isSafePlaintext). Pinning specifico contro la regressione "ciphertext nell'editor" che si è verificata in produzione (8 casi di transizione + guardia anti-leak su valori che iniziano per `enc:v1:`). Garantisce che il path di rendering rifiuti qualunque stringa cifrata anche se un futuro bug aggirasse la decifratura.
 - `linkify.test.mjs`: rendering anchor con `rel="noopener noreferrer" target="_blank"`, scheme http/https only, evita falsi positivi e URL troncati.
 - `lock.test.mjs`: stati `classifyLock`, `canEditNow`, `shouldRequestLock`, `nextHeartbeatDelayMs` (half-TTL clamp min/max, fallback senza expiry), `shouldAutoRelease` (idle gating), `parseIdleReleaseMs` (fallback su input invalido, clamp a `minMs`).
-- `sync.test.mjs`: `shouldApplyRemoteContent` (apply su delta vivente, ignora snapshot iniziale con changes pending, ignora content uguale) e `shouldFlushPendingLocalChanges` (flush solo dopo l'initial snapshot).
+- `sync.test.mjs`: `shouldApplyRemoteContent` (apply su delta vivente, non sovrascrive mai modifiche locali pending, ignora content uguale) e `shouldFlushPendingLocalChanges` (flush solo dopo l'initial snapshot).
+- `outbox.test.mjs`: coda di invio seriale (un encrypt lento non fa arrivare per ultimo un testo vecchio, flush accodati collassati, tasti premuti durante l'encrypt restano pending), fallback REST solo senza socket, testo confermato da `ack`/PUT, rollback su `lock_denied`, re-invio dopo `edit_rejected` e dopo una connessione caduta senza risposta.
+- `connection.test.mjs`: al massimo una WebSocket viva, eventi di socket sostituite ignorati, backoff esponenziale con reset all'apertura, probe che ferma le riconnessioni, kick durante probe/attesa, `stop`.
 - `offline-guard.test.mjs`: state iniziale, transizione `setOnline` (boolean return solo su cambio effettivo), coercion truthy/falsy.
 - `pinning.test.mjs`: path launcher/manifest per sessione, persistenza locale della chiave, preservazione della chiave su revisit senza hash, redirect risolto dal launcher.
-- `sw-routes.test.mjs`: classificazione delle richieste (asset statici cached, shell HTML network-first, snapshot/listing SWR, file blob cache-first, bundle/POST/PUT/DELETE/admin/healthz/manifest/sw passthrough, query string ininfluente, URL malformati passthrough).
+- `sw-routes.test.mjs`: classificazione delle richieste (asset statici cached, shell HTML network-first, snapshot network-first, file blob cache-first, bundle/POST/PUT/DELETE/admin/healthz/manifest/sw passthrough, query string ininfluente, URL malformati passthrough).
 
 ---
 
