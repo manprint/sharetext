@@ -107,7 +107,7 @@ func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	filename := sanitizeUploadName(header.Filename)
 
-	id, err := session.NewSlug(12)
+	id, err := session.NewSlug(store.FileIDLen)
 	if err != nil {
 		http.Error(w, "id gen failed", http.StatusInternalServerError)
 		return

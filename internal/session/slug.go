@@ -7,7 +7,7 @@ import (
 	"regexp"
 )
 
-const alphabet = "ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+const Alphabet = "ABCDEFGHIJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
 
 const (
 	NameMinLen = 1
@@ -23,14 +23,14 @@ func NewSlug(n int) (string, error) {
 	if n <= 0 {
 		n = 16
 	}
-	max := big.NewInt(int64(len(alphabet)))
+	max := big.NewInt(int64(len(Alphabet)))
 	buf := make([]byte, n)
 	for i := 0; i < n; i++ {
 		idx, err := rand.Int(rand.Reader, max)
 		if err != nil {
 			return "", err
 		}
-		buf[i] = alphabet[idx.Int64()]
+		buf[i] = Alphabet[idx.Int64()]
 	}
 	return string(buf), nil
 }

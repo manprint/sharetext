@@ -1206,8 +1206,12 @@ La goroutine `runCleanup` esegue a ogni tick (`CLEANUP_INTERVAL`):
 2. **`DeleteOrphanFiles()`**:
   - **Safety net**: rimuove righe `files` con `session_slug` non più presente in `sessions` (eseguito anche se FK fossero disabilitate, per resilienza in caso di DB incoerente).
   - **Filesystem**: se `FILE_STORAGE_BACKEND=fs`, rimuove anche le directory sessione rimaste orfane.
+3. **`SweepFSOrphans()`** — all'avvio e poi al massimo ogni 10 minuti, qualunque sia `FILE_STORAGE_BACKEND` (i file scritti quando il backend era `fs` restano su disco), scansiona `FILE_STORAGE_DIR`:
+  - **directory orfane** (nessuna riga in `sessions`, anche quelle lasciate da versioni precedenti): rimosse solo se contengono esclusivamente file regolari con nome da ID allegato (12 caratteri dell'alfabeto degli slug) o da file temporaneo di upload (`<id>-<cifre>.tmp`), e se directory e file non sono stati modificati da almeno 15 minuti. Prima di cancellare ricontrolla che nel frattempo non sia nata una sessione con lo stesso nome;
+  - **directory di sessioni vive**: rimuove solo file con nome da ID senza riga in `files` e temporanei di upload interrotti, sempre più vecchi di 15 minuti;
+  - tutto il resto resta dov'è: file con altri nomi, sottodirectory, symlink (mai seguiti), directory con nome non valido. Le directory vengono rimosse con `os.Remove` solo quando sono vuote, mai ricorsivamente, quindi un `FILE_STORAGE_DIR` puntato per errore su una directory condivisa non perde dati estranei. Le directory orfane lasciate per contenuto inatteso vengono elencate nel log (una volta, finché il loro numero non cambia).
 
-Gli allegati di una sessione attiva non vengono più ripuliti separatamente: un upload andato a buon fine resta disponibile fino alla hard-delete della sessione stessa.
+Gli allegati di una sessione attiva non vengono più ripuliti separatamente: un upload andato a buon fine (con la sua riga in `files`) resta disponibile fino alla hard-delete della sessione stessa.
 
 Garanzie complessive:
 
@@ -1303,6 +1307,7 @@ just vet            # go vet
   - cascade FK su session delete e DeleteExpired;
   - `ReferencedFileIDs` (regex marker, edge case);
   - `DeleteOrphanFiles`: unreferenced + grace protection + safety-net fallback con FK off;
+  - `SweepFSOrphans`: directory orfane stale rimosse, giovani o con contenuto inatteso (altri nomi, sottodirectory, symlink) lasciate intatte, file non referenziati e `.tmp` stale nelle sessioni vive, sessione ricreata durante lo sweep, backend `db`, idempotenza;
   - `secure_delete` PRAGMA letto correttamente quando l'opzione è attiva.
 - `internal/handlers`:
   - API sessioni (httptest): persistent/temporary validi e invalidi (400), 410 su scaduta su GET e PUT;
@@ -1402,6 +1407,7 @@ internal/
   store/
     store.go               sessions CRUD + scadenza + DeleteExpired + ListActive + secure_delete
     files.go               files CRUD + ReferencedFileIDs + DeleteOrphanFiles
+    fssweep.go             SweepFSOrphans: pulizia prudente di directory/file allegati orfani su disco
     options.go             Options (FileBackend, MaxFilesPerSession, SecureDelete, ...)
   handlers/
     api.go                 CRUD sessioni HTTP (X-Client-ID, lock auto-acquire)

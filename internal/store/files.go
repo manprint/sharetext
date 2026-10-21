@@ -12,6 +12,10 @@ import (
 
 var fileMarkerIDRe = regexp.MustCompile(`\[file:([A-Za-z0-9_-]+):`)
 
+// FileIDLen is the length of the random file IDs handed out on upload, which
+// also name the attachment files on disk.
+const FileIDLen = 12
+
 // ReferencedFileIDs extracts every file marker id from content.
 // Lenient: inline markers also count, to avoid false positives during sweep.
 func ReferencedFileIDs(content string) map[string]struct{} {

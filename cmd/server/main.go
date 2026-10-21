@@ -296,9 +296,32 @@ func main() {
 	}
 }
 
+// fsSweepEvery spaces out SweepFSOrphans, which lists the whole attachment
+// directory: orphans only appear when something went wrong, so there is no
+// need to look on every cleanup tick.
+const fsSweepEvery = 10 * time.Minute
+
 func runCleanup(ctx context.Context, st *store.Store, every time.Duration, metrics *telemetry.Metrics) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
+	var lastFSSweep time.Time
+	lastSkipped := 0
+	sweepFS := func() {
+		cctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		res, err := st.SweepFSOrphans(cctx, time.Now(), store.DefaultFSSweepGrace)
+		if err != nil {
+			log.Printf("cleanup attachment files: %v", err)
+		}
+		if res.RemovedDirs > 0 || res.RemovedFiles > 0 {
+			log.Printf("cleanup: removed %d orphan attachment dir(s) and %d stray file(s)", res.RemovedDirs, res.RemovedFiles)
+		}
+		// Report unrecognised directories once, not every sweep.
+		if res.SkippedCount > 0 && res.SkippedCount != lastSkipped {
+			log.Printf("cleanup: left %d orphan attachment dir(s) with unexpected content in place: %v", res.SkippedCount, res.SkippedDirs)
+		}
+		lastSkipped = res.SkippedCount
+	}
 	doSweep := func() {
 		started := time.Now()
 		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -319,6 +342,10 @@ func runCleanup(ctx context.Context, st *store.Store, every time.Duration, metri
 		}
 		if metrics != nil {
 			metrics.ObserveCleanup(deletedSessions, deletedFiles, time.Since(started))
+		}
+		if time.Since(lastFSSweep) >= fsSweepEvery {
+			lastFSSweep = time.Now()
+			sweepFS()
 		}
 	}
 	doSweep()

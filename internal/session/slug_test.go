@@ -32,7 +32,7 @@ func TestNewSlugAlphabet(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range s {
-		if !strings.ContainsRune(alphabet, r) {
+		if !strings.ContainsRune(Alphabet, r) {
 			t.Fatalf("char %q not in alphabet", r)
 		}
 	}
