@@ -153,22 +153,41 @@ async function networkFirstShell(req, cacheName) {
 
 // Session snapshots are network-first: the app reads them to decide whether
 // the session still exists (before every reconnect) and to seed the editor,
-// so a cached copy is only good while the network is unreachable. Serving it
+// so a cached copy is only good while the network is unusable. Serving it
 // first would resurrect deleted sessions and keep the editor reconnecting to
-// them forever.
+// them forever. A network that hangs instead of failing is unusable too: once
+// SNAPSHOT_TIMEOUT_MS have passed, a cached copy is served while the request
+// carries on in the background to refresh it.
+const SNAPSHOT_TIMEOUT_MS = 4000;
+
 async function networkFirstSnapshot(req, cacheName) {
   const cache = await caches.open(cacheName);
-  try {
-    const res = await fetch(req);
+  const network = fetch(req).then((res) => {
     if (res && res.ok) {
       cache.put(req, res.clone()).catch(() => {});
     } else if (res && (res.status === 404 || res.status === 410)) {
       cache.delete(req).catch(() => {});
     }
     return res;
+  });
+  network.catch(() => {});
+  const cached = await cache.match(req);
+  if (cached) {
+    let timer;
+    const timeout = new Promise((resolve) => { timer = setTimeout(resolve, SNAPSHOT_TIMEOUT_MS, null); });
+    try {
+      const res = await Promise.race([network, timeout]);
+      if (res) return res;
+    } catch {
+      // network error: fall through to the cached copy
+    } finally {
+      clearTimeout(timer);
+    }
+    return cached;
+  }
+  try {
+    return await network;
   } catch {
-    const hit = await cache.match(req);
-    if (hit) return hit;
     return new Response(JSON.stringify({ error: "offline" }), {
       status: 503,
       headers: { "Content-Type": "application/json" },
