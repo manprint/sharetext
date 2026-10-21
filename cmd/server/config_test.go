@@ -30,6 +30,8 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		"CREATE_RATE_LIMIT_RPS":     "2",
 		"CREATE_RATE_LIMIT_BURST":   "10",
 		"CREATE_RATE_LIMIT_TTL":     "15m",
+		"TRUSTED_PROXIES":           "10.0.0.1, private",
+		"REAL_IP_HEADER":            "X-Real-IP",
 	}
 	cfg := loadConfigFromEnv(func(key string) string { return env[key] })
 	if cfg.LockTTL != 25*time.Second {
@@ -61,6 +63,19 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	}
 	if cfg.WriteTimeout != 45*time.Second || cfg.IdleTimeout != 3*time.Minute || cfg.AuditLogDefaultLimit != 75 {
 		t.Fatalf("unexpected parsed values: %+v", cfg)
+	}
+	if cfg.TrustedProxies != "10.0.0.1, private" || cfg.RealIPHeader != "X-Real-IP" {
+		t.Fatalf("unexpected real IP config: %q %q", cfg.TrustedProxies, cfg.RealIPHeader)
+	}
+}
+
+func TestLoadConfigFromEnvRealIPDefaults(t *testing.T) {
+	cfg := loadConfigFromEnv(func(string) string { return "" })
+	if cfg.TrustedProxies != "private" || cfg.RealIPHeader != "X-Forwarded-For" {
+		t.Fatalf("unexpected real IP defaults: %q %q", cfg.TrustedProxies, cfg.RealIPHeader)
+	}
+	if _, err := handlers.ParseTrustedProxies(cfg.TrustedProxies); err != nil {
+		t.Fatalf("default TRUSTED_PROXIES must parse: %v", err)
 	}
 }
 

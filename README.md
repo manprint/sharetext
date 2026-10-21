@@ -112,6 +112,7 @@ Conseguenze pratiche:
 - WebSocket limitato allo stesso origin per default.
 - Password admin con supporto a bcrypt (`ADMIN_PASS_HASH`).
 - Rate limiting separato per traffico pubblico, creazione sessioni e admin.
+- IP del client letto dagli header di forwarding solo se la connessione arriva da un proxy fidato (`TRUSTED_PROXIES`): un client non puo' scegliersi l'IP per aggirare il rate limit.
 - `secure_delete` SQLite attivo per default.
 - Allegati cancellati insieme alla sessione via foreign key cascade.
 
@@ -178,6 +179,13 @@ volumes:
 
 - Se usi `FILE_STORAGE_BACKEND=fs`, conserva anche `FILE_STORAGE_DIR` nello stesso volume persistente.
 - Se metti l'app dietro Nginx, Traefik o Caddy, passa HTTPS e `X-Forwarded-Proto` correttamente.
+- Dietro reverse proxy il rate limit e' per IP del client solo se il proxy e' in `TRUSTED_PROXIES` (default `private`: loopback, reti RFC 1918, ULA e link-local IPv6, cioe' un proxy sullo stesso host o sulla bridge Docker). Con Nginx:
+  ```nginx
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  ```
+  Se il proxy si collega da un IP pubblico, impostalo esplicitamente (`TRUSTED_PROXIES=203.0.113.10`); il log di avvio riporta i valori attivi e un peer non fidato che invia header di forwarding genera un warning `realip: ... is not in TRUSTED_PROXIES`. Se il proxy sovrascrive sempre `X-Real-IP` puoi usare `REAL_IP_HEADER=X-Real-IP`.
+- Se Nginx gira sullo stesso host, pubblica la porta solo su loopback (`"127.0.0.1:8080:8080"` nel `compose.yaml`): cosi' nessuno puo' saltare il proxy.
 - Il `compose.yaml` del repository e' comodo per partire, ma in produzione devi rivedere almeno credenziali admin, policy TLS e limiti operativi.
 
 ## Deploy con binario standalone
@@ -303,6 +311,8 @@ ADMIN_PASS_HASH=$2a$12$...
 | `ADMIN_RATE_LIMIT_RPS` | `5` | Token al secondo per i route admin. | Limita bruteforce e polling aggressivo sull'admin. |
 | `ADMIN_RATE_LIMIT_BURST` | `15` | Burst massimo admin. | Più alto = più tolleranza alle raffiche brevi di richieste admin. |
 | `ADMIN_RATE_LIMIT_TTL` | `10m` | TTL bucket IP admin. | Tiene traccia degli IP admin per il tempo indicato. |
+| `TRUSTED_PROXIES` | `private` | IP o CIDR (CSV) dei reverse proxy di cui fidarsi per l'IP del client. `private` = loopback, RFC 1918, `fc00::/7`, link-local; `none` = nessuno. Valore non valido → l'avvio fallisce. | Se il proxy non e' in lista tutti gli utenti condividono il bucket del proxy; se ci metti reti da cui arrivano client diretti, quei client possono falsificare l'IP. |
+| `REAL_IP_HEADER` | `X-Forwarded-For` | Header da cui leggere l'IP del client inviato dai proxy fidati. | `X-Forwarded-For` e' letto da destra saltando i proxy fidati, quindi cio' che il client aggiunge a sinistra non conta. Altri header (es. `X-Real-IP`) devono contenere un solo IP sempre sovrascritto dal proxy. |
 
 ### Sicurezza HTTP e rete
 
@@ -545,7 +555,7 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 - **Admin password con hash bcrypt** (`ADMIN_PASS_HASH`), preferito sul plaintext `ADMIN_PASS`.
 - **`PRAGMA secure_delete=ON`** per evitare residui leggibili nelle pagine libere SQLite.
 - **CSP stretta** di default (no `'unsafe-inline'` su `script-src`), `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Permissions-Policy` minimale. Link nel testo emessi con `rel="noopener noreferrer"` per non leakare il fragment.
-- **Rate limit** per-IP separato per route pubblici, admin e creazione sessioni (`POST /api/sessions`, bucket dedicato più stretto contro flood).
+- **Rate limit** per-IP separato per route pubblici, admin e creazione sessioni (`POST /api/sessions`, bucket dedicato più stretto contro flood). L'IP arriva dagli header di forwarding solo se il peer è un proxy in `TRUSTED_PROXIES`, quindi un client non può cambiarsi IP con `X-Forwarded-For`, `X-Real-IP` o `True-Client-IP`.
 - **WebSocket liveness** (`WS_READ_TIMEOUT`, default `90s`): ping periodici, il peer che non risponde viene chiuso (difesa da slow-loris e connessioni morte) senza disconnettere chi guarda soltanto.
 - **Bcrypt admin hash validato a startup**: hash malformato → fail-fast, niente silent disable.
 
@@ -639,6 +649,8 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 | `CREATE_RATE_LIMIT_RPS` | `1` | Token/sec del rate limit dedicato a `POST /api/sessions`. |
 | `CREATE_RATE_LIMIT_BURST` | `5` | Burst massimo del rate limit di creazione sessioni: un IP può creare 5 sessioni in rapida successione, poi è capped a 1/s. |
 | `CREATE_RATE_LIMIT_TTL` | `10m` | TTL degli entry IP del rate limiter di creazione. |
+| `TRUSTED_PROXIES` | `private` | IP/CIDR (CSV) dei reverse proxy fidati per l'IP del client; `private` = loopback, RFC 1918, ULA, link-local; `none` = nessuno. Valore non valido → fail-fast all'avvio. Un peer non fidato che invia header di forwarding viene loggato (max una volta l'ora per IP). |
+| `REAL_IP_HEADER` | `X-Forwarded-For` | Header con l'IP del client. `X-Forwarded-For` è letto da destra a sinistra saltando i proxy fidati; un header diverso (es. `X-Real-IP`) deve contenere un solo IP che il proxy sovrascrive sempre. |
 | `READ_HEADER_TIMEOUT` | `5s` | Timeout di lettura degli header HTTP. |
 | `WRITE_TIMEOUT` | `30s` | Timeout di scrittura della risposta HTTP. |
 | `IDLE_TIMEOUT` | `2m` | Timeout keep-alive HTTP. |
@@ -1298,6 +1310,7 @@ just vet            # go vet
   - WebSocket end-to-end con 2 client + slug inesistente + origin foreign rifiutato (403) + same-host accettato (101) + viewer idle che sopravvive a `WS_READ_TIMEOUT` + peer che non risponde ai ping chiuso + `ack`/`edit_rejected`/`lock_denied` con `seq` + risposta agli heartbeat + scadenza del lock annunciata + admin delete che disconnette la stanza;
   - admin: missing/wrong creds (401), creds vuote (503), list (200 con esclusione scaduti, total_size con files), delete (200 + 404 idempotenza), delete unauthorized; branch bcrypt (`ADMIN_PASS_HASH`) valido e invalido, timing-safe;
   - middleware: HSTS applicato su `X-Forwarded-Proto: https`; rate limiter blocca burst per-IP, scenario dedicato `POST /api/sessions` (`CREATE_RATE_LIMIT_*`) per resistenza al flood;
+  - real IP: header di forwarding ignorati da peer non fidati, `X-Forwarded-For` letto da destra saltando i proxy fidati, `X-Real-IP` opzionale, IPv6 e IPv4-mapped, parsing di `TRUSTED_PROXIES`, rate limit non aggirabile ruotando gli header;
   - file: upload happy/missing/unknown/oversize (413), download (binary + Content-Disposition), list, bundle ZIP (verificato letto via `archive/zip`, dedup nomi duplicati);
   - lock: acquire/release/heartbeat, denial cross-client, auto-release su disconnect, eventi di transizione ordinati e coerenti con lo stato finale sotto concorrenza, timer di scadenza (heartbeat che la posticipa, riacquisizione non liberata dal vecchio timer);
   - store: scrittori concorrenti senza `SQLITE_BUSY` (transazioni `IMMEDIATE`), quota in byte e non in caratteri, cancellazione della directory FS della sessione.

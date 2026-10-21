@@ -41,6 +41,8 @@ type appConfig struct {
 	CreateRateLimitRPS      float64
 	CreateRateLimitBurst    int
 	CreateRateLimitTTL      time.Duration
+	TrustedProxies          string
+	RealIPHeader            string
 	ReadHeaderTimeout       time.Duration
 	WriteTimeout            time.Duration
 	IdleTimeout             time.Duration
@@ -92,6 +94,8 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		CreateRateLimitRPS:      floatEnv(getenv, "CREATE_RATE_LIMIT_RPS", 1),
 		CreateRateLimitBurst:    intEnv(getenv, "CREATE_RATE_LIMIT_BURST", 5),
 		CreateRateLimitTTL:      durationEnv(getenv, "CREATE_RATE_LIMIT_TTL", 10*time.Minute, 10*time.Minute),
+		TrustedProxies:          envOrWith(getenv, "TRUSTED_PROXIES", "private"),
+		RealIPHeader:            envOrWith(getenv, "REAL_IP_HEADER", "X-Forwarded-For"),
 		ReadHeaderTimeout:       durationEnv(getenv, "READ_HEADER_TIMEOUT", 5*time.Second, 5*time.Second),
 		WriteTimeout:            durationEnv(getenv, "WRITE_TIMEOUT", 30*time.Second, 30*time.Second),
 		IdleTimeout:             durationEnv(getenv, "IDLE_TIMEOUT", 2*time.Minute, 2*time.Minute),

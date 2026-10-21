@@ -58,6 +58,12 @@ func main() {
 			log.Fatalf("ADMIN_PASS_HASH is not a valid bcrypt hash: %v", err)
 		}
 	}
+	// Fail fast on a malformed TRUSTED_PROXIES rather than guess which peers
+	// may set the client address.
+	trustedProxies, err := handlers.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		log.Fatalf("TRUSTED_PROXIES: %v", err)
+	}
 	metrics := telemetry.NewMetrics(cfg.MetricsEnabled)
 
 	st, err := store.OpenWithOptions(cfg.DBPath, cfg.storeOptions())
@@ -116,7 +122,11 @@ func main() {
 	}{Version: version.Version, BuildID: buildID}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RealIP)
+	r.Use(handlers.RealIP(handlers.RealIPConfig{
+		TrustedProxies: trustedProxies,
+		Header:         cfg.RealIPHeader,
+		Logf:           log.Printf,
+	}))
 	r.Use(middleware.Recoverer)
 	r.Use(handlers.SecurityHeaders(handlers.SecurityHeadersConfig{
 		Enabled:                 cfg.SecurityHeadersEnabled,
@@ -271,7 +281,7 @@ func main() {
 		if cfg.VacuumInterval > 0 {
 			vacuumMode = cfg.VacuumInterval.String()
 		}
-		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, vacuum=%s, admin=%s, lock_ttl=%s, max_file=%dB, max_content=%dB, file_backend=%s)", version.Version, cfg.Port, cfg.DBPath, cfg.CleanupInterval, vacuumMode, adminMode, cfg.LockTTL, cfg.MaxFileSize, cfg.MaxContentSize, cfg.FileStorageBackend)
+		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, vacuum=%s, admin=%s, lock_ttl=%s, max_file=%dB, max_content=%dB, file_backend=%s, trusted_proxies=%s, real_ip_header=%s)", version.Version, cfg.Port, cfg.DBPath, cfg.CleanupInterval, vacuumMode, adminMode, cfg.LockTTL, cfg.MaxFileSize, cfg.MaxContentSize, cfg.FileStorageBackend, cfg.TrustedProxies, cfg.RealIPHeader)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}
