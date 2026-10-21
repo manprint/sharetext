@@ -31,6 +31,9 @@ const PRECACHE_URLS = [
   "/static/download.js",
   "/static/files.js",
   "/static/sync.js",
+  "/static/outbox.js",
+  "/static/connection.js",
+  "/static/editor.js",
   "/static/lock.js",
   "/static/commands.js",
   "/static/offline-guard.js",
@@ -40,6 +43,7 @@ const PRECACHE_URLS = [
   "/static/e2e-state.js",
   "/static/pinning.js",
   "/static/pin-launcher.js",
+  "/static/create.js",
   "/static/favicon.svg",
   "/static/icon-maskable.svg",
   "/static/icon-192.png",
@@ -99,7 +103,7 @@ self.addEventListener("fetch", (event) => {
       event.respondWith(networkFirstShell(req, CACHE.shells));
       return;
     case "api-snapshot":
-      event.respondWith(staleWhileRevalidate(req, CACHE.api));
+      event.respondWith(networkFirstSnapshot(req, CACHE.api));
       return;
     case "api-file-blob":
       event.respondWith(cacheFirstWithBound(req, CACHE.files, FILES_CACHE_MAX));
@@ -147,24 +151,29 @@ async function networkFirstShell(req, cacheName) {
   }
 }
 
-async function staleWhileRevalidate(req, cacheName) {
+// Session snapshots are network-first: the app reads them to decide whether
+// the session still exists (before every reconnect) and to seed the editor,
+// so a cached copy is only good while the network is unreachable. Serving it
+// first would resurrect deleted sessions and keep the editor reconnecting to
+// them forever.
+async function networkFirstSnapshot(req, cacheName) {
   const cache = await caches.open(cacheName);
-  const cached = await cache.match(req);
-  const networkPromise = fetch(req).then((res) => {
-    if (res && res.ok) cache.put(req, res.clone()).catch(() => {});
+  try {
+    const res = await fetch(req);
+    if (res && res.ok) {
+      cache.put(req, res.clone()).catch(() => {});
+    } else if (res && (res.status === 404 || res.status === 410)) {
+      cache.delete(req).catch(() => {});
+    }
     return res;
-  }).catch(() => null);
-  if (cached) {
-    // Kick off background refresh, but don't await it.
-    event_waitUntilSafe(networkPromise);
-    return cached;
+  } catch {
+    const hit = await cache.match(req);
+    if (hit) return hit;
+    return new Response(JSON.stringify({ error: "offline" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
   }
-  const fresh = await networkPromise;
-  if (fresh) return fresh;
-  return new Response(JSON.stringify({ error: "offline" }), {
-    status: 503,
-    headers: { "Content-Type": "application/json" },
-  });
 }
 
 async function cacheFirstWithBound(req, cacheName, max) {
@@ -190,11 +199,4 @@ async function trimCache(cache, max) {
   // back under the cap.
   const overflow = keys.length - max;
   await Promise.all(keys.slice(0, overflow).map((k) => cache.delete(k)));
-}
-
-// Best-effort fire-and-forget for SWR background refresh; we are already
-// outside the fetch event by the time the promise resolves, so there's no
-// FetchEvent.waitUntil handle to attach to. Swallow rejections.
-function event_waitUntilSafe(promise) {
-  promise.catch(() => {});
 }
