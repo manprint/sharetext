@@ -49,9 +49,9 @@ test:
 test-race:
     go test -race ./... -count=1
 
-# Run JS tests (block parser + countdown + download helpers + editor lock + PWA)
+# Run JS tests (every cmd/server/static/*.test.mjs)
 test-js:
-    node --test cmd/server/static/blocks.test.mjs cmd/server/static/countdown.test.mjs cmd/server/static/download.test.mjs cmd/server/static/files.test.mjs cmd/server/static/sync.test.mjs cmd/server/static/editor.test.mjs cmd/server/static/lock.test.mjs cmd/server/static/linkify.test.mjs cmd/server/static/sw-routes.test.mjs cmd/server/static/offline-guard.test.mjs cmd/server/static/crypto.test.mjs cmd/server/static/bundle-client.test.mjs cmd/server/static/e2e-state.test.mjs cmd/server/static/pinning.test.mjs
+    node --test cmd/server/static/*.test.mjs
 
 # Run all tests
 test-all: test test-js

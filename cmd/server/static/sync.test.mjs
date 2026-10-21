@@ -20,6 +20,15 @@ test('shouldApplyRemoteContent: ignores initial snapshot while local changes are
   }), false);
 });
 
+test('shouldApplyRemoteContent: never overwrites pending local changes with a live update', () => {
+  assert.equal(shouldApplyRemoteContent({
+    currentContent: 'typed, not yet sent',
+    incomingContent: 'own PUT echo',
+    hasPendingLocalChanges: true,
+    initialSnapshot: false,
+  }), false);
+});
+
 test('shouldApplyRemoteContent: ignores identical content', () => {
   assert.equal(shouldApplyRemoteContent({
     currentContent: 'same',

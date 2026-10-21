@@ -31,16 +31,21 @@ const (
 // viewers are not dropped.
 const DefaultWSReadTimeout = 90 * time.Second
 
+// wsMsg is a client→server message. Seq is an optional client-chosen edit
+// number echoed in the reply to that edit (ack, edit_rejected or lock_denied),
+// so the client can tell which of its edits each reply is about.
 type wsMsg struct {
 	Type    string `json:"type,omitempty"`
 	Content string `json:"content,omitempty"`
+	Seq     int64  `json:"seq,omitempty"`
 }
 
-// wsAck confirms to the sender that an edit was persisted. WebSocket frames
-// are ordered, so one ack per accepted edit lets the client know exactly what
+// wsAck confirms to the sender that an edit was persisted. Together with the
+// rejections below every edit gets exactly one reply, so the client knows what
 // the server holds; an edit that never gets one is re-sent after reconnecting.
 type wsAck struct {
 	Type string `json:"type"` // always "ack"
+	Seq  int64  `json:"seq,omitempty"`
 }
 
 // wsEditRejected tells the sender an edit was not persisted for a reason other
@@ -48,6 +53,7 @@ type wsAck struct {
 type wsEditRejected struct {
 	Type  string `json:"type"` // always "edit_rejected"
 	Error string `json:"error"`
+	Seq   int64  `json:"seq,omitempty"`
 }
 
 func (a *API) WS(w http.ResponseWriter, r *http.Request) {
@@ -192,7 +198,7 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 				// below, so peers see the edit first (simple clients that only
 				// look at content keep working).
 				if snap, granted, _ := a.Locks.acquire(slug, clientID, false); !granted {
-					writeBack(lockDeniedEvent{Type: "lock_denied", Lock: snap})
+					writeBack(lockDeniedEvent{Type: "lock_denied", Lock: snap, Seq: m.Seq})
 					continue
 				}
 			}
@@ -211,7 +217,7 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 				if errors.Is(err, store.ErrSessionStorageExceeded) {
 					reason = err.Error()
 				}
-				writeBack(wsEditRejected{Type: "edit_rejected", Error: reason})
+				writeBack(wsEditRejected{Type: "edit_rejected", Error: reason, Seq: m.Seq})
 				continue
 			}
 			if a.Metrics != nil {
@@ -226,7 +232,7 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 			if a.Locks != nil {
 				a.Locks.announce(slug)
 			}
-			writeBack(wsAck{Type: "ack"})
+			writeBack(wsAck{Type: "ack", Seq: m.Seq})
 		case wsTypeAcquire:
 			if a.Locks == nil {
 				continue

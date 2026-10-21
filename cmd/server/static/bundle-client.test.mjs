@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildZip } from "./bundle-client.js";
+import { buildZip, uniqueEntryName } from "./bundle-client.js";
 import { execFileSync } from "node:child_process";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -94,4 +94,20 @@ test("buildZip output is recognised by system unzip (if available)", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("uniqueEntryName: keeps distinct names and numbers duplicates", () => {
+  const used = new Set();
+  assert.equal(uniqueEntryName("report.pdf", used), "report.pdf");
+  assert.equal(uniqueEntryName("notes", used), "notes");
+  assert.equal(uniqueEntryName("report.pdf", used), "report (2).pdf");
+  assert.equal(uniqueEntryName("Report.PDF", used), "Report (3).PDF");
+  assert.equal(uniqueEntryName("notes", used), "notes (2)");
+  assert.equal(uniqueEntryName(".env", used), ".env");
+  assert.equal(uniqueEntryName(".env", used), ".env (2)");
+  // A generated name that collides with a real one is skipped too.
+  const used2 = new Set();
+  uniqueEntryName("a (2).txt", used2);
+  uniqueEntryName("a.txt", used2);
+  assert.equal(uniqueEntryName("a.txt", used2), "a (3).txt");
 });

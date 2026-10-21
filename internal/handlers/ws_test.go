@@ -58,6 +58,7 @@ type wsEnvelope struct {
 	Content  string        `json:"content,omitempty"`
 	ClientID string        `json:"client_id,omitempty"`
 	Lock     *LockSnapshot `json:"lock,omitempty"`
+	Seq      int64         `json:"seq,omitempty"`
 }
 
 func readEnvelope(t *testing.T, ctx context.Context, c *websocket.Conn) wsEnvelope {
@@ -554,13 +555,62 @@ func TestWSEditRejectedWhenStorageExceeded(t *testing.T) {
 	}
 	defer c.CloseNow()
 	readJSON(t, ctx, c)
-	body, _ := json.Marshal(wsMsg{Type: "edit", Content: "way more than eight bytes"})
+	body, _ := json.Marshal(wsMsg{Type: "edit", Content: "way more than eight bytes", Seq: 3})
 	if err := c.Write(ctx, websocket.MessageText, body); err != nil {
 		t.Fatal(err)
 	}
 	ev := readUntil(t, ctx, c, "edit_rejected", "ack")
 	if ev.Type != "edit_rejected" {
 		t.Fatalf("over-quota edit must be rejected, got %q", ev.Type)
+	}
+	if ev.Seq != 3 {
+		t.Fatalf("edit_rejected must echo the edit's seq, got %d", ev.Seq)
+	}
+}
+
+func TestWSEditRepliesEchoSeq(t *testing.T) {
+	srv, api := newWSServer(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "wsseq"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "wsseq"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	readJSON(t, ctx, c)
+
+	body, _ := json.Marshal(wsMsg{Type: "edit", Content: "accepted", Seq: 7})
+	if err := c.Write(ctx, websocket.MessageText, body); err != nil {
+		t.Fatal(err)
+	}
+	if ev := readUntil(t, ctx, c, "ack"); ev.Seq != 7 {
+		t.Fatalf("ack must echo the edit's seq, got %d", ev.Seq)
+	}
+
+	// Take the lock away from the connection, then edit again.
+	release, _ := json.Marshal(wsMsg{Type: "lock_release"})
+	if err := c.Write(ctx, websocket.MessageText, release); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, ok := api.Locks.Acquire("wsseq", "ghost"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lock was never released")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	body, _ = json.Marshal(wsMsg{Type: "edit", Content: "refused", Seq: 8})
+	if err := c.Write(ctx, websocket.MessageText, body); err != nil {
+		t.Fatal(err)
+	}
+	if ev := readUntil(t, ctx, c, "lock_denied", "ack"); ev.Type != "lock_denied" || ev.Seq != 8 {
+		t.Fatalf("refused edit must get lock_denied with its seq, got %q seq %d", ev.Type, ev.Seq)
 	}
 }
 

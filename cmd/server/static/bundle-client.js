@@ -44,6 +44,30 @@ function u16(view, off, v) { view.setUint16(off, v, true); }
 function u32(view, off, v) { view.setUint32(off, v, true); }
 
 /**
+ * Returns `name`, or `name (2)`, `name (3)`… (counter before the extension)
+ * if it is already in `used`, and records the result there. Zip entry names
+ * must be unique: given duplicates, extractors silently keep one of the
+ * files. Names are compared case-insensitively because so are the file
+ * systems of Windows and macOS.
+ * @param {string} name
+ * @param {Set<string>} used
+ * @returns {string}
+ */
+export function uniqueEntryName(name, used) {
+  let candidate = name;
+  if (used.has(candidate.toLowerCase())) {
+    const dot = name.lastIndexOf(".");
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    const ext = dot > 0 ? name.slice(dot) : "";
+    for (let n = 2; used.has(candidate.toLowerCase()); n++) {
+      candidate = `${stem} (${n})${ext}`;
+    }
+  }
+  used.add(candidate.toLowerCase());
+  return candidate;
+}
+
+/**
  * Build a ZIP archive from a list of entries.
  * @param {{name: string, data: Uint8Array}[]} entries
  * @returns {Uint8Array}

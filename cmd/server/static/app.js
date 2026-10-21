@@ -32,7 +32,7 @@ import {
   MODE_E2E,
   MODE_LOCKED,
 } from './e2e-state.js';
-import { downloadZip } from './bundle-client.js';
+import { downloadZip, uniqueEntryName } from './bundle-client.js';
 import {
   classifyLock,
   canEditNow,
@@ -53,6 +53,8 @@ import {
 } from './commands.js';
 import { initOfflineGuard, setOfflineBanner } from './offline-guard.js';
 import { rememberPinnedSession } from './pinning.js';
+import { createOutbox } from './outbox.js';
+import { createConnection } from './connection.js';
 
 const slug = document.body.dataset.slug;
 const $content = document.getElementById('content');
@@ -101,13 +103,8 @@ if ($toggleView) {
   });
 }
 
-let ws = null;
 let suppressSend = false;
 let debounceTimer = null;
-let lastSent = '';
-let lastServerContent = '';
-let hasPendingLocalChanges = false;
-let awaitingInitialSnapshot = false;
 let expiresAt = null;
 let countdownTimer = null;
 let expiredHandled = false;
@@ -120,7 +117,12 @@ let lastUserInputAt = 0;
 let heartbeatTimer = null;
 let idleTimer = null;
 let pendingUploadOffset = null;
+let uploadsInFlight = 0;
 let isOffline = false;
+// Client IDs of this tab's earlier connections. The server may not have
+// noticed yet that one of them is gone, so a lock it still holds is ours:
+// local edits wait for it to lapse instead of being rolled back.
+const formerClientIDs = [];
 let editorLogicalLineStarts = [0];
 let editorLineOffsets = [0];
 let editorMeasureScheduled = false;
@@ -209,6 +211,13 @@ function enqueueApply(fn) {
   return applyQueue;
 }
 
+// Outgoing edits: serialised, acknowledged by the server, see outbox.js.
+const outbox = createOutbox({
+  readText: () => $content.value,
+  encode: (text) => encryptOutgoing(text),
+  deliver: (wire, opts) => deliverEdit(wire, opts),
+});
+
 function applyModeUI() {
   if (sessionMode === 'locked') {
     setDecryptBanner('Sessione cifrata: chiave mancante nell’URL. Apri il link completo per leggere.');
@@ -222,6 +231,14 @@ function applyModeUI() {
 
 function isLockedForEditing() {
   return sessionMode === 'locked' || sessionMode === 'pending';
+}
+
+// canEditLocally reports whether a local change (typing, a command, an
+// upload) may be made right now. Without the session key, before the mode is
+// settled, offline or while a peer holds the lock, the editor is read-only:
+// anything written then would replace ciphertext with plaintext or be refused.
+function canEditLocally() {
+  return !expiredHandled && !isLockedForEditing() && !isOffline && canEditNow(lockState);
 }
 
 function setStatus(online) {
@@ -471,10 +488,10 @@ async function applyRemote(rawContent, { initialSnapshot = false } = {}) {
   if (!shouldApplyRemoteContent({
     currentContent: $content.value,
     incomingContent: plain,
-    hasPendingLocalChanges,
+    hasPendingLocalChanges: outbox.isPending(),
     initialSnapshot,
   })) {
-    lastServerContent = plain;
+    outbox.remoteSeen(plain);
     return false;
   }
   const sel = [$content.selectionStart, $content.selectionEnd];
@@ -483,8 +500,7 @@ async function applyRemote(rawContent, { initialSnapshot = false } = {}) {
   try { $content.setSelectionRange(sel[0], sel[1]); } catch {}
   suppressSend = false;
   renderItems(plain);
-  lastSent = plain;
-  lastServerContent = plain;
+  outbox.remoteApplied(plain);
   // Peer may have just uploaded an attachment: any marker id we don't know
   // about must trigger a metadata refresh, otherwise the file row renders
   // "(allegato cifrato)" forever and the download click yields the raw
@@ -547,33 +563,50 @@ async function refreshFileMetaIfStale(plainText) {
   await fileMetaInFlight;
 }
 
-async function send(content) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  if (content === lastSent) {
-    hasPendingLocalChanges = false;
-    return true;
+// deliverEdit hands one encrypted edit to a transport for the outbox. The
+// WebSocket is preferred; REST (allowRest) only stands in while it is down,
+// so the two never race each other.
+async function deliverEdit(wire, { allowRest, seq }) {
+  if (expiredHandled || isLockedForEditing()) return null;
+  const socket = conn.openSocket();
+  if (socket) {
+    try {
+      socket.send(JSON.stringify({ type: 'edit', content: wire, seq }));
+      return 'ws';
+    } catch {}
   }
-  let wire;
-  try {
-    wire = await encryptOutgoing(content);
-  } catch (err) {
-    console.error('encrypt failed, not transmitting', err);
-    return false;
+  if (!allowRest) return null;
+  const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}`, {
+    method: 'PUT',
+    headers: clientHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ content: wire }),
+  });
+  if (res.ok) return 'rest';
+  if (res.status === 409) toast('Editor bloccato da un altro utente');
+  else toast(`Salvataggio fallito (${res.status})`);
+  return null;
+}
+
+// flushEdits sends pending local edits now (cancelling the debounce).
+function flushEdits(opts) {
+  clearTimeout(debounceTimer);
+  if (expiredHandled || isLockedForEditing() || lockState === LOCK_STATE_THEIRS) {
+    return Promise.resolve(false);
   }
-  try {
-    ws.send(JSON.stringify({ type: 'edit', content: wire }));
-  } catch {
-    return false;
-  }
-  lastSent = content;
-  hasPendingLocalChanges = false;
-  return true;
+  if (!outbox.isPending()) return Promise.resolve(true);
+  return outbox.flush(opts);
+}
+
+function scheduleFlush() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => { flushEdits(); }, 250);
 }
 
 function wsSend(payload) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  const socket = conn.openSocket();
+  if (!socket) return false;
   try {
-    ws.send(JSON.stringify(payload));
+    socket.send(JSON.stringify(payload));
     return true;
   } catch {
     return false;
@@ -608,7 +641,9 @@ function scheduleIdleRelease() {
   clearIdleTimer();
   if (lockState !== LOCK_STATE_MINE) return;
   idleTimer = setTimeout(() => {
-    if (shouldAutoRelease({
+    // An upload counts as activity: its marker still has to be written under
+    // the lock once the file is stored.
+    if (uploadsInFlight === 0 && shouldAutoRelease({
       state: lockState,
       lastInputAt: lastUserInputAt,
       nowMs: Date.now(),
@@ -653,39 +688,42 @@ function applyLockSnapshot(snap) {
   lockHolder = (snap && snap.holder) || '';
   lockExpiresAt = (snap && snap.expires_at) || null;
   if (lockState === LOCK_STATE_MINE) {
+    // Replies to our heartbeats land here too: pace the next one on the
+    // fresh expiry, but only a new acquisition restarts the idle countdown.
     scheduleHeartbeat();
-    scheduleIdleRelease();
+    if (previous !== LOCK_STATE_MINE) scheduleIdleRelease();
   } else {
     clearHeartbeat();
     clearIdleTimer();
   }
-  if (previous !== LOCK_STATE_THEIRS && lockState === LOCK_STATE_THEIRS && hasPendingLocalChanges) {
-    // We lost the race: drop any pending local edit and restore the last known
-    // server content so we don't display ghost text the peer never received.
-    revertToServerContent();
+  if (lockState === LOCK_STATE_THEIRS && outbox.isPending()) {
+    if (!formerClientIDs.includes(lockHolder)) {
+      // A peer holds the lock: local edits it has not seen can never be
+      // stored. Drop them and show the last text the server confirmed rather
+      // than ghost text nobody else has.
+      revertLocalEdits('Modifica annullata: editor bloccato da un altro utente');
+    }
+    // Otherwise the holder is one of our own dead connections: keep the
+    // edits until that lock lapses.
+  } else if (previous === LOCK_STATE_THEIRS && lockState !== LOCK_STATE_THEIRS && outbox.isPending()) {
+    flushEdits();
   }
   updateLockUI();
 }
 
-function revertToServerContent() {
+// revertLocalEdits abandons unconfirmed local edits and restores the last
+// text the server is known to hold. The toast is shown only when the editor
+// actually changes.
+function revertLocalEdits(message) {
   clearTimeout(debounceTimer);
-  hasPendingLocalChanges = false;
-  if ($content.value !== lastServerContent) {
+  const text = outbox.revert();
+  if ($content.value !== text) {
     suppressSend = true;
-    $content.value = lastServerContent;
+    $content.value = text;
     suppressSend = false;
-    renderItems(lastServerContent);
-    lastSent = lastServerContent;
-    toast(isOffline
-      ? 'Offline — sola lettura'
-      : 'Modifica annullata: editor bloccato da un altro utente');
+    renderItems(text);
+    if (message) toast(message);
   }
-}
-
-function flushPendingLocalChanges() {
-  if (!hasPendingLocalChanges) return;
-  clearTimeout(debounceTimer);
-  send($content.value);
 }
 
 function handleExpired() {
@@ -693,8 +731,11 @@ function handleExpired() {
   expiredHandled = true;
   clearHeartbeat();
   clearIdleTimer();
+  clearTimeout(debounceTimer);
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
-  if (ws) { try { ws.close(); } catch {} }
+  conn.stop();
+  setStatus(false);
+  hideMenu();
   $content.disabled = true;
   $copyAll.disabled = true;
   if ($lockBadge) { $lockBadge.hidden = true; $lockBadge.textContent = ''; }
@@ -733,6 +774,10 @@ function startCountdown(iso) {
 
 async function applySessionPayload(s, { initialSnapshot = false } = {}) {
   if (initialSnapshot && typeof s.client_id === 'string' && s.client_id) {
+    if (clientID && clientID !== s.client_id) {
+      formerClientIDs.push(clientID);
+      if (formerClientIDs.length > 8) formerClientIDs.shift();
+    }
     clientID = s.client_id;
   }
   if (typeof s.content === 'string') await applyRemote(s.content, { initialSnapshot });
@@ -740,65 +785,96 @@ async function applySessionPayload(s, { initialSnapshot = false } = {}) {
     if (s.expires_at) startCountdown(s.expires_at);
     else if ($countdown) $countdown.hidden = true;
   }
-  if (s.lock !== undefined) {
+  // Only snapshots are authoritative for the lock. Live updates may embed
+  // the lock state as read when they were built, possibly older than a lock
+  // event that overtook them; lock changes arrive as their own ordered events.
+  if (initialSnapshot && s.lock !== undefined) {
     applyLockSnapshot(s.lock);
   }
 }
 
-function connect() {
-  if (expiredHandled) return;
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(slug)}`);
-  ws.addEventListener('open', () => {
-    awaitingInitialSnapshot = true;
-    setStatus(true);
-  });
-  ws.addEventListener('close', () => {
-    awaitingInitialSnapshot = false;
+// probeSession runs before every reconnect: a session that is gone must show
+// the overlay instead of retrying forever.
+async function probeSession() {
+  if (expiredHandled) return false;
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(slug)}`, { cache: 'no-store' });
+    if (r.status === 410 || r.status === 404) {
+      handleExpired();
+      return false;
+    }
+  } catch {}
+  return !expiredHandled;
+}
+
+const conn = createConnection({
+  open: () => {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    return new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(slug)}`);
+  },
+  schedule: (fn, ms) => setTimeout(fn, ms),
+  cancel: (t) => clearTimeout(t),
+  shouldReconnect: probeSession,
+  onOpen: () => setStatus(true),
+  onClose: () => {
     setStatus(false);
-    if (expiredHandled) return;
-    // If the session expired in the meantime, GET will return 410 → overlay.
-    fetch(`/api/sessions/${encodeURIComponent(slug)}`).then((r) => {
-      if (r.status === 410 || r.status === 404) {
-        handleExpired();
-        return;
-      }
-      setTimeout(connect, 1500);
-    }).catch(() => setTimeout(connect, 1500));
-  });
-  ws.addEventListener('error', () => ws.close());
-  ws.addEventListener('message', (ev) => {
+    // Serialised with message handling, so replies already received are
+    // accounted for before the unanswered edits are marked for re-sending.
+    enqueueApply(() => outbox.connectionLost());
+  },
+  onMessage: (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg && msg.type === 'lock') {
+    if (!msg || typeof msg !== 'object') return;
+    // Every message goes through the same queue as content, so a lock change
+    // can never be applied before a slower content decrypt that preceded it.
+    enqueueApply(() => handleServerMessage(msg));
+  },
+});
+
+async function handleServerMessage(msg) {
+  switch (msg.type) {
+    case 'lock':
       applyLockSnapshot(msg.lock || null);
       return;
-    }
-    if (msg && msg.type === 'lock_denied') {
+    case 'lock_denied':
+      // A refused edit makes the text pending again; applying the snapshot
+      // then rolls it back (or keeps it while the holder is our own stale
+      // connection).
+      outbox.refused(msg.seq);
       applyLockSnapshot(msg.lock || null);
       return;
-    }
-    const initialSnapshot = awaitingInitialSnapshot;
-    awaitingInitialSnapshot = false;
-    // Serialise async applies so a faster decrypt can't overtake a slower one
-    // that arrived before it.
-    enqueueApply(async () => {
-      // Server may send a snapshot whose content is encrypted before we have
-      // finished settling the session mode (e.g. WS hello races the initial
-      // GET on first load). Settle it now if still pending.
-      if (initialSnapshot && sessionMode === 'pending' && typeof msg.content === 'string') {
-        determineSessionMode(msg.content);
-        applyModeUI();
+    case 'ack':
+      outbox.ack(msg.seq);
+      return;
+    case 'edit_rejected':
+      if (outbox.refused(msg.seq)) {
+        toast(`Modifica non salvata: ${msg.error || 'errore del server'}`);
       }
-      await applySessionPayload(msg, { initialSnapshot });
-      if (shouldFlushPendingLocalChanges({ initialSnapshot, hasPendingLocalChanges })) {
-        flushPendingLocalChanges();
-      }
-    });
-  });
+      return;
+    case undefined:
+      break;
+    default:
+      return; // unknown event from a newer server
+  }
+  // Session payload. Only the first message of a connection carries a
+  // client_id: that is the snapshot.
+  const initialSnapshot = typeof msg.client_id === 'string' && msg.client_id !== '';
+  // Server may send a snapshot whose content is encrypted before we have
+  // finished settling the session mode (e.g. WS hello races the initial
+  // GET on first load). Settle it now if still pending.
+  if (initialSnapshot && sessionMode === 'pending' && typeof msg.content === 'string') {
+    determineSessionMode(msg.content);
+    applyModeUI();
+  }
+  await applySessionPayload(msg, { initialSnapshot });
+  if (shouldFlushPendingLocalChanges({ initialSnapshot, hasPendingLocalChanges: outbox.isPending() })) {
+    flushEdits();
+  }
 }
 
 function applyProgrammaticEdit(nextValue, caret) {
+  if (!canEditLocally()) return false;
   suppressSend = true;
   $content.value = nextValue;
   try {
@@ -806,15 +882,15 @@ function applyProgrammaticEdit(nextValue, caret) {
     $content.setSelectionRange(c, c);
   } catch {}
   suppressSend = false;
-  hasPendingLocalChanges = true;
+  outbox.markDirty();
   lastUserInputAt = Date.now();
   renderItems(nextValue);
   if (shouldRequestLock(lockState)) {
     wsSend({ type: 'lock_acquire' });
   }
   scheduleIdleRelease();
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => send($content.value), 250);
+  scheduleFlush();
+  return true;
 }
 
 registerCommand('timestamp', (ctx) => {
@@ -830,7 +906,7 @@ registerCommand('upload', (ctx) => {
   // by handleUploads() once files are picked.
   const before = ctx.text.slice(0, ctx.tokenStart);
   const after = ctx.text.slice(ctx.tokenEnd);
-  applyProgrammaticEdit(before + after, ctx.tokenStart);
+  if (!applyProgrammaticEdit(before + after, ctx.tokenStart)) return;
   pendingUploadOffset = ctx.tokenStart;
   try { $fileInput.click(); } catch {}
 });
@@ -946,7 +1022,7 @@ function menuVisible() {
 }
 
 function updateCommandMenu() {
-  if (expiredHandled || !canEditNow(lockState)) { hideMenu(); return; }
+  if (!canEditLocally()) { hideMenu(); return; }
   const token = findSlashTokenAtCaret($content.value, $content.selectionStart);
   if (!token) { hideMenu(); return; }
   showMenu(token);
@@ -1032,21 +1108,23 @@ $content.addEventListener('beforeinput', (ev) => {
 
 $content.addEventListener('input', () => {
   if (suppressSend || expiredHandled) return;
-  if (isLockedForEditing() || isOffline || !canEditNow(lockState)) {
+  if (!canEditLocally()) {
     // beforeinput should have prevented this, but if a browser doesn't
     // honour it (rare), restore server content as a safety net.
-    revertToServerContent();
+    let why = 'Editor bloccato da un altro utente';
+    if (sessionMode === 'locked') why = 'Sessione cifrata: chiave mancante';
+    else if (isOffline) why = 'Offline — sola lettura';
+    revertLocalEdits(why);
     return;
   }
-  hasPendingLocalChanges = true;
+  outbox.markDirty();
   lastUserInputAt = Date.now();
   renderItems($content.value);
   if (shouldRequestLock(lockState)) {
     wsSend({ type: 'lock_acquire' });
   }
   scheduleIdleRelease();
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => send($content.value), 250);
+  scheduleFlush();
   updateCommandMenu();
 });
 
@@ -1094,9 +1172,17 @@ if (typeof ResizeObserver !== 'undefined') {
 window.addEventListener('resize', scheduleEditorLineMetrics);
 
 window.addEventListener('beforeunload', () => {
-  if (lockState === LOCK_STATE_MINE) {
-    wsSend({ type: 'lock_release' });
-  }
+  // Best effort: the debounce may still hold the last keystrokes. The release
+  // is queued behind them so the server stores the edit first.
+  flushEdits().finally(() => {
+    if (lockState === LOCK_STATE_MINE) wsSend({ type: 'lock_release' });
+  });
+});
+
+// Mobile browsers may freeze or discard a hidden tab without any unload
+// event: send what the debounce is holding as soon as the page is hidden.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushEdits();
 });
 
 $copyAll.addEventListener('click', () => copyText($content.value));
@@ -1114,13 +1200,16 @@ if ($downloadAll) {
       const entries = [];
       // Session text decrypted from the editor buffer (already plaintext).
       entries.push({ name: `${slug}.txt`, data: new TextEncoder().encode($content.value) });
+      const usedNames = new Set();
       for (const [id, meta] of fileMetaCache.entries()) {
         const r = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files/${encodeURIComponent(id)}`);
         if (!r.ok) throw new Error(`fetch ${id}: ${r.status}`);
         const ct = new Uint8Array(await r.arrayBuffer());
         const pt = await decryptBytes(cryptoKey, ct);
         const safeName = (meta.name || `file-${id}.bin`).replace(/[\\/]/g, '_');
-        entries.push({ name: `files/${safeName}`, data: pt });
+        // Two attachments may share a name; a zip with duplicate entries
+        // makes extractors silently keep only one of them.
+        entries.push({ name: `files/${uniqueEntryName(safeName, usedNames)}`, data: pt });
       }
       downloadZip(`${slug}.zip`, entries);
     } catch (err) {
@@ -1198,36 +1287,6 @@ function startOfLine(text, offset) {
 }
 
 
-async function pushContent(text) {
-  // Persist via PUT so the change survives even when the WebSocket is not yet
-  // open (e.g. right after page load on mobile). The server-side hub then
-  // broadcasts to all peers, including this client's WS.
-  hasPendingLocalChanges = true;
-  lastSent = text;
-  let wire;
-  try {
-    wire = await encryptOutgoing(text);
-  } catch (err) {
-    console.error('encrypt failed, dropping PUT', err);
-    return;
-  }
-  try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}`, {
-      method: 'PUT',
-      headers: clientHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ content: wire }),
-    });
-    if (res.status === 409) {
-      throw new Error('Editor bloccato da un altro utente');
-    }
-    if (!res.ok) throw new Error(`PUT ${res.status}`);
-    hasPendingLocalChanges = false;
-  } catch (e) {
-    // Fallback: try WS path (no-op if WS not open yet).
-    send(text);
-  }
-}
-
 function appendAtEnd(text, lines) {
   let prefix = text;
   if (prefix && !prefix.endsWith('\n')) prefix += '\n';
@@ -1236,16 +1295,37 @@ function appendAtEnd(text, lines) {
   return prefix + block;
 }
 
+// uploadBlockedReason explains why attachments cannot be added right now, or
+// returns '' when they can. Uploading without the session key would store a
+// plaintext file and then overwrite the encrypted text with a marker-only
+// body; before the mode is settled the same could happen.
+function uploadBlockedReason() {
+  if (expiredHandled) return 'Sessione scaduta';
+  if (sessionMode === 'locked') return 'Sessione cifrata: chiave mancante';
+  if (sessionMode === 'pending') return 'Sessione non ancora caricata';
+  if (isOffline) return 'Offline — sola lettura';
+  if (!canEditNow(lockState)) return 'Upload bloccato: editor in uso da un altro utente';
+  return '';
+}
+
 async function handleUploads(files, atOffset) {
   if (!files || files.length === 0) return;
-  if (isOffline) {
-    toast('Offline — sola lettura');
+  const blocked = uploadBlockedReason();
+  if (blocked) {
+    toast(blocked);
     return;
   }
-  if (!canEditNow(lockState)) {
-    toast('Upload bloccato: editor in uso da un altro utente');
-    return;
+  uploadsInFlight++;
+  try {
+    await uploadAndInsert(files, atOffset);
+  } finally {
+    uploadsInFlight--;
+    lastUserInputAt = Date.now();
+    scheduleIdleRelease();
   }
+}
+
+async function uploadAndInsert(files, atOffset) {
   // Pre-acquire the lock so peers see the busy state before the first byte lands.
   if (shouldRequestLock(lockState)) {
     wsSend({ type: 'lock_acquire' });
@@ -1265,13 +1345,26 @@ async function handleUploads(files, atOffset) {
     }
   }
   if (markers.length > 0) {
-    const value = $content.value;
-    const next = atOffset == null
-      ? appendAtEnd(value, markers)
-      : insertMarkersAtPosition(value, atOffset, markers);
-    $content.value = next;
-    renderItems(next);
-    await pushContent(next);
+    if (expiredHandled || isLockedForEditing()) {
+      errors.push('Allegati caricati ma non inseriti: sessione non modificabile');
+    } else if (lockState === LOCK_STATE_THEIRS && !formerClientIDs.includes(lockHolder)) {
+      // The markers could never be stored, and pending text would hold back
+      // the holder's updates until it is rolled back.
+      errors.push('Allegati caricati ma non inseriti: editor in uso da un altro utente');
+    } else {
+      const value = $content.value;
+      const next = atOffset == null
+        ? appendAtEnd(value, markers)
+        : insertMarkersAtPosition(value, atOffset, markers);
+      suppressSend = true;
+      $content.value = next;
+      suppressSend = false;
+      outbox.markDirty();
+      renderItems(next);
+      // REST stands in for the WebSocket if it is down (e.g. right after page
+      // load on mobile), so the marker of a stored file is not lost.
+      await flushEdits({ allowRest: true });
+    }
   }
   if (errors.length > 0) toast(errors.join(' · '));
 }
@@ -1319,12 +1412,9 @@ function onDrop(ev) {
   ev.preventDefault();
   dragDepth = 0;
   $content.classList.remove('drag-over');
-  if (isOffline) {
-    toast('Offline — sola lettura');
-    return;
-  }
-  if (!canEditNow(lockState)) {
-    toast('Drag&drop bloccato: editor in uso da un altro utente');
+  const blocked = uploadBlockedReason();
+  if (blocked) {
+    toast(canEditNow(lockState) ? blocked : 'Drag&drop bloccato: editor in uso da un altro utente');
     return;
   }
   const offset = caretOffsetFromEvent(ev);
@@ -1413,7 +1503,7 @@ async function loadFileMeta() {
 
   if (expiredHandled) return;
   await loadFileMeta();
-  connect();
+  conn.connect();
 })();
 
 initOfflineGuard({
@@ -1421,17 +1511,16 @@ initOfflineGuard({
     isOffline = false;
     setOfflineBanner(false);
     updateLockUI();
-    // The WS reconnect loop already nudges itself every ~1.5s after close,
-    // but if it has gone fully dormant (no close pending) kick it once.
-    if (!ws || ws.readyState === WebSocket.CLOSED) {
-      try { connect(); } catch {}
-    }
+    // Skip any reconnect back-off; a no-op while a socket is alive.
+    conn.connect();
   },
   onOffline: () => {
     isOffline = true;
     setOfflineBanner(true, 'Offline — sola lettura');
-    clearTimeout(debounceTimer);
-    hasPendingLocalChanges = false;
+    // The editor turns read-only. Edits typed before are not dropped: they
+    // go out now if the socket still works, or after the next reconnect.
+    flushEdits();
+    hideMenu();
     updateLockUI();
   },
 });

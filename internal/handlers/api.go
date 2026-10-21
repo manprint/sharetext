@@ -115,10 +115,11 @@ type lockEvent struct {
 }
 
 // lockDeniedEvent is sent only to the requesting client when a write was rejected
-// because someone else holds the lock.
+// because someone else holds the lock. Seq echoes the refused edit's number.
 type lockDeniedEvent struct {
 	Type string       `json:"type"` // always "lock_denied"
 	Lock LockSnapshot `json:"lock"`
+	Seq  int64        `json:"seq,omitempty"`
 }
 
 func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
