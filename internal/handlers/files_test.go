@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"sharetext/internal/store"
+	"unicode/utf8"
 )
 
 func newFilesRouter(t *testing.T) (*API, *chi.Mux) {
@@ -27,6 +28,7 @@ func newFilesRouter(t *testing.T) (*API, *chi.Mux) {
 	}
 	t.Cleanup(func() { st.Close() })
 	api := &API{Store: st, Hub: NewHub(), Locks: NewLockManager(0), SlugLen: 16}
+	api.AttachLockEvents()
 	r := chi.NewRouter()
 	r.Post("/api/sessions/{slug}/files", api.UploadFile)
 	r.Get("/api/sessions/{slug}/files", api.ListFiles)
@@ -116,10 +118,8 @@ func TestUploadUnknownSession(t *testing.T) {
 }
 
 func TestUploadUnknownSessionReturns404BeforeSizeCheck(t *testing.T) {
-	_, r := newFilesRouter(t)
-	old := MaxFileSize
-	MaxFileSize = 16
-	t.Cleanup(func() { MaxFileSize = old })
+	api, r := newFilesRouter(t)
+	api.MaxFileSize = 16
 	w := doUpload(t, r, "ghost", "big.bin", "application/octet-stream", []byte(strings.Repeat("x", 64)))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d", w.Code)
@@ -175,9 +175,7 @@ func TestUploadOversize(t *testing.T) {
 	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "u3"}); err != nil {
 		t.Fatal(err)
 	}
-	old := MaxFileSize
-	MaxFileSize = 16
-	t.Cleanup(func() { MaxFileSize = old })
+	api.MaxFileSize = 16
 
 	w := doUpload(t, r, "u3", "big.bin", "application/octet-stream", []byte(strings.Repeat("x", 64)))
 	if w.Code != http.StatusRequestEntityTooLarge {
@@ -297,5 +295,19 @@ func TestBundleZip(t *testing.T) {
 	}
 	if string(names["files/a.txt"]) == "" || string(names["files/a-2.txt"]) == "" {
 		t.Fatalf("duplicate filename not deduped: %v", names)
+	}
+}
+
+func TestSanitizeUploadNameKeepsValidUTF8(t *testing.T) {
+	long := strings.Repeat("è", 150) // 300 bytes
+	got := sanitizeUploadName(long)
+	if len(got) > maxUploadNameBytes {
+		t.Fatalf("name not truncated: %d bytes", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncation split a rune: %q", got)
+	}
+	if got := sanitizeUploadName("a\x7fb.txt"); got != "ab.txt" {
+		t.Fatalf("DEL must be stripped, got %q", got)
 	}
 }

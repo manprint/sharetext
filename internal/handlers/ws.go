@@ -23,17 +23,31 @@ const (
 	wsTypeRelease   = "lock_release"
 )
 
-// WSReadTimeout caps how long the server will wait for the next WebSocket frame
-// before closing the connection. Defends against slow-loris-style attacks that
-// open a connection and never send anything, tying up goroutines indefinitely.
-// Configurable from main; the default is generous enough that a real client
-// emitting at least a lock_heartbeat each LOCK_TTL/2 (≤ 7.5s by default) keeps
-// the connection alive without bumping into it.
-var WSReadTimeout = 90 * time.Second
+// DefaultWSReadTimeout is the liveness window used when API.WSReadTimeout is
+// unset. A peer that shows no sign of life for this long is disconnected,
+// which defends against slow-loris-style connections that tie up goroutines
+// indefinitely. Liveness is proven by answering the server's pings (every
+// browser does so automatically, even for a tab that only watches), so idle
+// viewers are not dropped.
+const DefaultWSReadTimeout = 90 * time.Second
 
 type wsMsg struct {
 	Type    string `json:"type,omitempty"`
 	Content string `json:"content,omitempty"`
+}
+
+// wsAck confirms to the sender that an edit was persisted. WebSocket frames
+// are ordered, so one ack per accepted edit lets the client know exactly what
+// the server holds; an edit that never gets one is re-sent after reconnecting.
+type wsAck struct {
+	Type string `json:"type"` // always "ack"
+}
+
+// wsEditRejected tells the sender an edit was not persisted for a reason other
+// than the editor lock (which gets lock_denied).
+type wsEditRejected struct {
+	Type  string `json:"type"` // always "edit_rejected"
+	Error string `json:"error"`
 }
 
 func (a *API) WS(w http.ResponseWriter, r *http.Request) {
@@ -59,9 +73,8 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.CloseNow()
-	if MaxContentSize > 0 {
-		c.SetReadLimit(MaxContentSize + 1024)
-	}
+	maxContent := a.maxContentSize()
+	c.SetReadLimit(maxContent + 1024)
 
 	clientID, err := session.NewSlug(16)
 	if err != nil {
@@ -69,22 +82,22 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch := a.Hub.Join(slug)
+	sub := a.Hub.Join(slug)
 	// Release any lock this client holds when the connection ends, then leave the room.
 	// Lock release happens before Leave so peers (still in the room) receive the lock event.
 	defer func() {
 		if a.Locks != nil {
-			if snap, released := a.Locks.Release(slug, clientID); released {
-				a.broadcastLock(slug, snap, ch)
-			}
+			a.Locks.Release(slug, clientID)
 		}
-		a.Hub.Leave(slug, ch)
+		a.Hub.Leave(slug, sub)
 	}()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
 	// Initial snapshot includes the freshly minted client_id and the current lock state.
+	// It is written before the writer goroutine starts; broadcasts that arrive
+	// meanwhile wait in the subscriber buffer, so none is lost.
 	if sess, err := a.Store.Get(ctx, slug); err == nil {
 		resp := toSessionResp(sess)
 		resp.ClientID = clientID
@@ -101,7 +114,13 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-ctx.Done():
 				return
-			case msg, ok := <-ch:
+			case <-sub.Done():
+				// Dropped by the hub (fell behind, or the session is gone):
+				// close so the client reconnects from a fresh snapshot.
+				_ = c.Close(websocket.StatusTryAgainLater, "resync")
+				cancel()
+				return
+			case msg, ok := <-sub.C:
 				if !ok {
 					return
 				}
@@ -116,21 +135,41 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Keepalive. c.Read only returns on data frames, so a read deadline would
+	// also kill viewers that legitimately never send anything. Pings are
+	// answered by the peer's WebSocket stack (pongs are consumed by the read
+	// loop below); a peer that leaves one unanswered for half the liveness
+	// window, after up to another half of silence, is gone.
+	pingEvery := a.wsReadTimeout() / 2
+	go func() {
+		t := time.NewTicker(pingEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				pctx, pcancel := context.WithTimeout(ctx, pingEvery)
+				err := c.Ping(pctx)
+				pcancel()
+				if err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
 	writeBack := func(payload any) {
 		data, err := json.Marshal(payload)
 		if err != nil {
 			return
 		}
-		select {
-		case ch <- data:
-		default:
-		}
+		sub.send(data)
 	}
 
 	for {
-		readCtx, readCancel := context.WithTimeout(ctx, WSReadTimeout)
-		_, data, err := c.Read(readCtx)
-		readCancel()
+		_, data, err := c.Read(ctx)
 		if err != nil {
 			return
 		}
@@ -144,56 +183,62 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 		}
 		switch typ {
 		case wsTypeEdit:
-			if MaxContentSize > 0 && int64(len(m.Content)) > MaxContentSize {
+			if int64(len(m.Content)) > maxContent {
 				_ = c.Close(websocket.StatusMessageTooBig, "content too large")
 				return
 			}
-			var lockChanged bool
 			if a.Locks != nil {
-				prev := a.Locks.State(slug)
-				snap, granted := a.Locks.Acquire(slug, clientID)
-				if !granted {
+				// A change of holder is announced after the content broadcast
+				// below, so peers see the edit first (simple clients that only
+				// look at content keep working).
+				if snap, granted, _ := a.Locks.acquire(slug, clientID, false); !granted {
 					writeBack(lockDeniedEvent{Type: "lock_denied", Lock: snap})
 					continue
 				}
-				lockChanged = !prev.Held || prev.Holder != snap.Holder
 			}
 			sess, err := a.Store.Update(ctx, slug, m.Content)
 			if err != nil {
+				if a.Locks != nil {
+					a.Locks.announce(slug)
+				}
 				if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrExpired) {
 					return
 				}
+				if ctx.Err() != nil {
+					return
+				}
+				reason := "internal error"
+				if errors.Is(err, store.ErrSessionStorageExceeded) {
+					reason = err.Error()
+				}
+				writeBack(wsEditRejected{Type: "edit_rejected", Error: reason})
 				continue
 			}
 			if a.Metrics != nil {
 				a.Metrics.IncSessionUpdates()
 			}
 			resp := toSessionResp(sess)
-			if a.Locks != nil {
-				snap := a.Locks.State(slug)
-				if snap.Held {
-					resp.Lock = &snap
-				}
+			if snap, held := a.lockState(slug); held {
+				resp.Lock = &snap
 			}
 			out, _ := json.Marshal(resp)
-			a.Hub.Broadcast(slug, out, ch)
-			if lockChanged && a.Locks != nil {
-				a.broadcastLock(slug, a.Locks.State(slug), nil)
+			a.Hub.Broadcast(slug, out, sub)
+			if a.Locks != nil {
+				a.Locks.announce(slug)
 			}
+			writeBack(wsAck{Type: "ack"})
 		case wsTypeAcquire:
 			if a.Locks == nil {
 				continue
 			}
-			prev := a.Locks.State(slug)
-			snap, granted := a.Locks.Acquire(slug, clientID)
+			snap, granted, changed := a.Locks.acquire(slug, clientID, true)
 			if !granted {
 				writeBack(lockDeniedEvent{Type: "lock_denied", Lock: snap})
 				continue
 			}
-			if !prev.Held || prev.Holder != snap.Holder {
-				a.broadcastLock(slug, snap, nil)
-			} else {
-				// Already held by us: confirm new TTL just to the caller.
+			if !changed {
+				// Already held by us: the room learnt nothing new, confirm
+				// the refreshed TTL to the caller only.
 				writeBack(lockEvent{Type: "lock", Lock: snap})
 			}
 		case wsTypeHeartbeat:
@@ -204,14 +249,16 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 			if !refreshed {
 				// Caller is no longer the holder (likely TTL expired); inform.
 				writeBack(lockDeniedEvent{Type: "lock_denied", Lock: snap})
+				continue
 			}
+			// Hand back the new expiry so the client paces its next
+			// heartbeat on the real deadline instead of the stale one.
+			writeBack(lockEvent{Type: "lock", Lock: snap})
 		case wsTypeRelease:
 			if a.Locks == nil {
 				continue
 			}
-			if snap, released := a.Locks.Release(slug, clientID); released {
-				a.broadcastLock(slug, snap, nil)
-			}
+			a.Locks.Release(slug, clientID)
 		default:
 			// Unknown type → ignore.
 		}

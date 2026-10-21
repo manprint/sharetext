@@ -141,6 +141,11 @@ func (a *API) AdminDelete(w http.ResponseWriter, r *http.Request) {
 	if a.Locks != nil {
 		a.Locks.Forget(slug)
 	}
+	if a.Hub != nil {
+		// Disconnect the room: clients reconnect, get 404 and show the
+		// "session gone" overlay instead of editing into the void.
+		a.Hub.Kick(slug)
+	}
 	_ = a.Store.RecordAudit(r.Context(), store.AuditEntry{
 		Actor:   adminActor(r),
 		Action:  "admin.delete_session",

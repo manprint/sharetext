@@ -378,11 +378,11 @@ func (s *Store) sessionHasFSFiles(ctx context.Context, slug string) (bool, error
 	return exists == 1, nil
 }
 
-func (s *Store) expiredFSSessionSlugs(ctx context.Context) ([]string, error) {
+func (s *Store) expiredFSSessionSlugs(ctx context.Context, now int64) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT f.session_slug
 		FROM files f
 		JOIN sessions s ON s.slug = f.session_slug
-		WHERE f.storage_backend = ? AND s.expires_at IS NOT NULL AND s.expires_at <= ?`, FileBackendFS, time.Now().UTC().Unix())
+		WHERE f.storage_backend = ? AND s.expires_at IS NOT NULL AND s.expires_at <= ?`, FileBackendFS, now)
 	if err != nil {
 		return nil, err
 	}

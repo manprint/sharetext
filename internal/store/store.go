@@ -58,7 +58,12 @@ func OpenWithOptions(path string, opts Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
+	// _txlock=immediate: write transactions read before they write. Begun
+	// DEFERRED, two of them racing deadlock on the read→write upgrade, and
+	// SQLite fails one with SQLITE_BUSY at once (busy_timeout does not apply
+	// there). BEGIN IMMEDIATE takes the write lock up front, so a contending
+	// writer simply waits up to busy_timeout instead.
+	dsn := fmt.Sprintf("file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
 	if normalized.SecureDelete {
 		dsn += "&_pragma=secure_delete(1)"
 	}
@@ -348,7 +353,7 @@ func getSessionStats(row interface {
 
 func (s *Store) sessionStatsTx(ctx context.Context, tx *sql.Tx, slug string) (*sessionStats, error) {
 	row := tx.QueryRowContext(ctx, `SELECT slug, name, created_at, expires_at,
-		COALESCE(length(content), 0),
+		COALESCE(length(CAST(content AS BLOB)), 0),
 		COALESCE((SELECT SUM(size) FROM files WHERE session_slug = ?), 0),
 		COALESCE((SELECT COUNT(*) FROM files WHERE session_slug = ?), 0)
 		FROM sessions WHERE slug = ?`, slug, slug, slug)
@@ -395,7 +400,7 @@ func (s SessionSummary) TotalSize() int64 {
 func (s *Store) ListActive(ctx context.Context) ([]SessionSummary, error) {
 	now := time.Now().UTC().Unix()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT s.slug, s.name, length(s.content), s.created_at, s.updated_at, s.expires_at,
+		`SELECT s.slug, s.name, length(CAST(s.content AS BLOB)), s.created_at, s.updated_at, s.expires_at,
 		        COALESCE((SELECT SUM(size) FROM files f WHERE f.session_slug = s.slug), 0) AS files_size,
 		        COALESCE((SELECT COUNT(*)  FROM files f WHERE f.session_slug = s.slug), 0) AS files_count
 		   FROM sessions s
@@ -433,13 +438,17 @@ func (s *Store) ListActive(ctx context.Context) ([]SessionSummary, error) {
 
 // DeleteExpired removes all sessions with expires_at <= now. Returns number deleted.
 func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
-	fsSlugs, err := s.expiredFSSessionSlugs(ctx)
+	// One cutoff for both statements: a session crossing its expiry between
+	// them would otherwise be deleted (cascading its file rows) without its
+	// directory being listed, leaking the files on disk for good.
+	now := time.Now().UTC().Unix()
+	fsSlugs, err := s.expiredFSSessionSlugs(ctx, now)
 	if err != nil {
 		return 0, err
 	}
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= ?`,
-		time.Now().UTC().Unix())
+		now)
 	if err != nil {
 		return 0, err
 	}
@@ -533,7 +542,9 @@ func (s *Store) Delete(ctx context.Context, slug string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	if hadFSFiles {
+	// The FS backend may have written a file since sessionHasFSFiles looked
+	// (AddFile racing the delete), so it always sweeps the directory.
+	if hadFSFiles || s.opts.FileBackend == FileBackendFS {
 		_ = s.removeSessionDir(slug)
 	}
 	return nil

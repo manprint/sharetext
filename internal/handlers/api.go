@@ -23,10 +23,11 @@ const (
 // ClientIDHeader is the HTTP header carrying the editor-lock client identifier.
 const ClientIDHeader = "X-Client-ID"
 
-// 6 MiB leaves room for the ~34% inflation introduced by base64-encoded
-// AES-GCM ciphertext while still capping the effective plaintext payload at
-// roughly 4 MiB.
-var MaxContentSize int64 = 6 * 1024 * 1024
+// DefaultMaxContentSize is the session-text limit used when API.MaxContentSize
+// is unset. 6 MiB leaves room for the ~34% inflation introduced by
+// base64-encoded AES-GCM ciphertext while still capping the effective
+// plaintext payload at roughly 4 MiB.
+const DefaultMaxContentSize int64 = 6 * 1024 * 1024
 
 type API struct {
 	Store                *store.Store
@@ -38,6 +39,46 @@ type API struct {
 	// AllowedOrigins is forwarded to the WebSocket Accept call. Empty means
 	// same-origin only (request Host is always authorized by the library).
 	AllowedOrigins []string
+	// Request limits. Zero (or negative) selects the matching Default*.
+	// They live on the API instead of package variables so handlers never
+	// read configuration that something else may be rewriting concurrently.
+	MaxContentSize int64
+	MaxFileSize    int64
+	WSReadTimeout  time.Duration
+}
+
+func (a *API) maxContentSize() int64 {
+	if a.MaxContentSize > 0 {
+		return a.MaxContentSize
+	}
+	return DefaultMaxContentSize
+}
+
+func (a *API) maxFileSize() int64 {
+	if a.MaxFileSize > 0 {
+		return a.MaxFileSize
+	}
+	return DefaultMaxFileSize
+}
+
+func (a *API) wsReadTimeout() time.Duration {
+	if a.WSReadTimeout > 0 {
+		return a.WSReadTimeout
+	}
+	return DefaultWSReadTimeout
+}
+
+// AttachLockEvents makes every editor-lock transition (acquired by a new
+// holder, released, expired) reach the WebSocket peers of the slug, in the
+// order the transitions happened. Call it once, after Hub and Locks are set
+// and before serving requests.
+func (a *API) AttachLockEvents() {
+	if a.Locks == nil || a.Hub == nil {
+		return
+	}
+	a.Locks.OnChange(func(slug string, snap LockSnapshot) {
+		a.broadcastLock(slug, snap, nil)
+	})
 }
 
 type createReq struct {
@@ -157,7 +198,8 @@ func (a *API) GetSession(w http.ResponseWriter, r *http.Request) {
 func (a *API) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	var body updateReq
-	if err := decodeJSONBody(w, r, &body, MaxContentSize+1024); err != nil {
+	maxContent := a.maxContentSize()
+	if err := decodeJSONBody(w, r, &body, maxContent+1024); err != nil {
 		if errors.Is(err, errBodyTooLarge) {
 			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
 			return
@@ -166,15 +208,19 @@ func (a *API) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if MaxContentSize > 0 && int64(len(body.Content)) > MaxContentSize {
+	if int64(len(body.Content)) > maxContent {
 		http.Error(w, "content too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	clientID := strings.TrimSpace(r.Header.Get(ClientIDHeader))
-	snap, lockChanged, ok := a.tryWriteLock(slug, clientID)
-	if !ok {
+	// Like the WS edit path, a change of holder is announced only after the
+	// content broadcast.
+	if snap, ok := a.tryWriteLock(slug, clientID, false); !ok {
 		writeLockDenied(w, snap)
 		return
+	}
+	if a.Locks != nil {
+		defer a.Locks.announce(slug)
 	}
 
 	sess, err := a.Store.Update(r.Context(), slug, body.Content)
@@ -195,9 +241,6 @@ func (a *API) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	if a.Hub != nil {
 		msg, _ := json.Marshal(resp)
 		a.Hub.Broadcast(slug, msg, nil)
-		if lockChanged && a.Locks != nil {
-			a.broadcastLock(slug, a.Locks.State(slug), nil)
-		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -206,22 +249,18 @@ func (a *API) UpdateSession(w http.ResponseWriter, r *http.Request) {
 // If clientID is non-empty, it attempts to acquire ownership; on failure the
 // caller is rejected with the current snapshot. If clientID is empty, it falls
 // back to CanWrite semantics (allowed only when nobody else holds the lock).
-// Returns (snapshot, lockStateChanged, allowed).
-func (a *API) tryWriteLock(slug, clientID string) (LockSnapshot, bool, bool) {
+// A change of holder is announced to the room by the LockManager, right away
+// or, with announce=false, when the caller later calls Locks.announce.
+// Returns (snapshot, allowed).
+func (a *API) tryWriteLock(slug, clientID string, announce bool) (LockSnapshot, bool) {
 	if a.Locks == nil {
-		return LockSnapshot{}, false, true
+		return LockSnapshot{}, true
 	}
-	prev := a.Locks.State(slug)
 	if clientID == "" {
-		_, allowed := a.Locks.CanWrite(slug, "")
-		return prev, false, allowed
+		return a.Locks.CanWrite(slug, "")
 	}
-	snap, granted := a.Locks.Acquire(slug, clientID)
-	if !granted {
-		return snap, false, false
-	}
-	changed := !prev.Held || prev.Holder != snap.Holder
-	return snap, changed, true
+	snap, granted, _ := a.Locks.acquire(slug, clientID, announce)
+	return snap, granted
 }
 
 func (a *API) lockState(slug string) (LockSnapshot, bool) {
@@ -232,7 +271,7 @@ func (a *API) lockState(slug string) (LockSnapshot, bool) {
 	return snap, snap.Held
 }
 
-func (a *API) broadcastLock(slug string, snap LockSnapshot, except chan []byte) {
+func (a *API) broadcastLock(slug string, snap LockSnapshot, except *Subscriber) {
 	if a.Hub == nil {
 		return
 	}

@@ -233,3 +233,143 @@ func TestLockTTLDefault(t *testing.T) {
 		t.Fatalf("want default TTL %v, got %v", DefaultLockTTL, lm.TTL())
 	}
 }
+
+type lockEventLog struct {
+	mu     sync.Mutex
+	events []LockSnapshot
+	ch     chan LockSnapshot
+}
+
+func watchLocks(lm *LockManager) *lockEventLog {
+	l := &lockEventLog{ch: make(chan LockSnapshot, 1024)}
+	lm.OnChange(func(slug string, snap LockSnapshot) {
+		l.mu.Lock()
+		l.events = append(l.events, snap)
+		l.mu.Unlock()
+		select {
+		case l.ch <- snap:
+		default: // the callback runs under the manager's mutex: never block
+		}
+	})
+	return l
+}
+
+func (l *lockEventLog) next(t *testing.T, within time.Duration) LockSnapshot {
+	t.Helper()
+	select {
+	case s := <-l.ch:
+		return s
+	case <-time.After(within):
+		t.Fatalf("no lock event within %s", within)
+		return LockSnapshot{}
+	}
+}
+
+func (l *lockEventLog) none(t *testing.T, during time.Duration) {
+	t.Helper()
+	select {
+	case s := <-l.ch:
+		t.Fatalf("unexpected lock event %+v", s)
+	case <-time.After(during):
+	}
+}
+
+func TestLockOnChangeReportsTransitionsOnly(t *testing.T) {
+	lm := NewLockManager(time.Minute)
+	log := watchLocks(lm)
+	lm.Acquire("s", "A")
+	if ev := log.next(t, time.Second); !ev.Held || ev.Holder != "A" {
+		t.Fatalf("acquire must announce A, got %+v", ev)
+	}
+	lm.Acquire("s", "A")
+	lm.Heartbeat("s", "A")
+	lm.Acquire("s", "B") // denied
+	log.none(t, 50*time.Millisecond)
+	lm.Release("s", "A")
+	if ev := log.next(t, time.Second); ev.Held {
+		t.Fatalf("release must announce free, got %+v", ev)
+	}
+}
+
+func TestLockExpiryIsAnnounced(t *testing.T) {
+	lm := NewLockManager(100 * time.Millisecond)
+	log := watchLocks(lm)
+	lm.Acquire("s", "A")
+	log.next(t, time.Second)
+	if ev := log.next(t, 2*time.Second); ev.Held {
+		t.Fatalf("expiry must announce free, got %+v", ev)
+	}
+	if lm.State("s").Held {
+		t.Fatal("lock must be free after the expiry event")
+	}
+}
+
+func TestLockHeartbeatPostponesExpiry(t *testing.T) {
+	lm := NewLockManager(150 * time.Millisecond)
+	log := watchLocks(lm)
+	lm.Acquire("s", "A")
+	log.next(t, time.Second)
+	for i := 0; i < 4; i++ {
+		time.Sleep(75 * time.Millisecond)
+		if _, ok := lm.Heartbeat("s", "A"); !ok {
+			t.Fatalf("heartbeat %d refused", i)
+		}
+	}
+	select {
+	case ev := <-log.ch:
+		t.Fatalf("heartbeating holder must keep the lock, got %+v", ev)
+	default:
+	}
+	if ev := log.next(t, 2*time.Second); ev.Held {
+		t.Fatalf("lock must expire once heartbeats stop, got %+v", ev)
+	}
+}
+
+func TestLockReacquireAfterReleaseIsNotFreedByOldTimer(t *testing.T) {
+	lm := NewLockManager(100 * time.Millisecond)
+	log := watchLocks(lm)
+	lm.Acquire("s", "A")
+	log.next(t, time.Second)
+	time.Sleep(60 * time.Millisecond)
+	lm.Release("s", "A")
+	log.next(t, time.Second)
+	lm.Acquire("s", "B")
+	log.next(t, time.Second)
+	// A's timer would have fired ~40ms from now; B's lock must survive it.
+	time.Sleep(70 * time.Millisecond)
+	if snap := lm.State("s"); !snap.Held || snap.Holder != "B" {
+		t.Fatalf("B's fresh lock must outlive A's stale timer, got %+v", snap)
+	}
+}
+
+func TestLockEventsMatchFinalStateUnderConcurrency(t *testing.T) {
+	lm := NewLockManager(time.Minute)
+	log := watchLocks(lm)
+	var wg sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				if _, ok := lm.Acquire("s", id); ok {
+					lm.Release("s", id)
+				}
+			}
+		}(string(rune('A' + g)))
+	}
+	wg.Wait()
+	lm.Acquire("s", "Z")
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	held := false
+	holder := ""
+	for i, ev := range log.events {
+		if ev.Held == held {
+			t.Fatalf("event %d repeats state held=%v: transitions out of order", i, held)
+		}
+		held, holder = ev.Held, ev.Holder
+	}
+	if snap := lm.State("s"); snap.Held != held || snap.Holder != holder {
+		t.Fatalf("last event (%v,%q) disagrees with state %+v", held, holder, snap)
+	}
+}

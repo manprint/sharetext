@@ -15,7 +15,7 @@ const (
 )
 
 var (
-	nameRe        = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	nameRe         = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	ErrInvalidName = errors.New("invalid name")
 )
 

@@ -2,13 +2,13 @@ package handlers
 
 import (
 	"archive/zip"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -16,9 +16,9 @@ import (
 	"sharetext/internal/store"
 )
 
-// MaxFileSize is the per-upload limit in bytes (set from main via env).
-// Default is wired from CLI; safe fallback here.
-var MaxFileSize int64 = 10 * 1024 * 1024
+// DefaultMaxFileSize is the per-upload limit in bytes used when
+// API.MaxFileSize is unset.
+const DefaultMaxFileSize int64 = 10 * 1024 * 1024
 
 type fileResp struct {
 	ID        string    `json:"id"`
@@ -59,17 +59,14 @@ func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID := strings.TrimSpace(r.Header.Get(ClientIDHeader))
-	snap, lockChanged, allowed := a.tryWriteLock(slug, clientID)
-	if !allowed {
+	if snap, allowed := a.tryWriteLock(slug, clientID, true); !allowed {
 		writeLockDenied(w, snap)
 		return
 	}
-	if lockChanged && a.Hub != nil && a.Locks != nil {
-		a.broadcastLock(slug, a.Locks.State(slug), nil)
-	}
+	maxFile := a.maxFileSize()
 	// Reject oversize early via MaxBytesReader.
-	r.Body = http.MaxBytesReader(w, r.Body, MaxFileSize+512*1024) // +slack for multipart overhead
-	if err := r.ParseMultipartForm(MaxFileSize + 512*1024); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxFile+512*1024) // +slack for multipart overhead
+	if err := r.ParseMultipartForm(maxFile + 512*1024); err != nil {
 		http.Error(w, "upload too large or malformed", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -79,7 +76,7 @@ func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer fh.Close()
-	if header.Size > MaxFileSize {
+	if header.Size > maxFile {
 		http.Error(w, "file exceeds max size", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -89,7 +86,7 @@ func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 	for {
 		n, rerr := fh.Read(tmp)
 		if n > 0 {
-			if int64(len(buf)+n) > MaxFileSize {
+			if int64(len(buf)+n) > maxFile {
 				http.Error(w, "file exceeds max size", http.StatusRequestEntityTooLarge)
 				return
 			}
@@ -250,20 +247,34 @@ func sanitizeUploadName(s string) string {
 	if s == "" || s == "." || s == ".." {
 		return "file.bin"
 	}
-	// Remove control chars.
+	// Remove control chars (and repair invalid UTF-8, which strings.Map
+	// turns into U+FFFD).
 	cleaned := strings.Map(func(r rune) rune {
-		if r < 0x20 {
+		if r < 0x20 || r == 0x7f {
 			return -1
 		}
 		return r
 	}, s)
-	if len(cleaned) > 200 {
-		cleaned = cleaned[:200]
-	}
+	cleaned = truncateUTF8(cleaned, maxUploadNameBytes)
 	if cleaned == "" {
 		return "file.bin"
 	}
 	return cleaned
+}
+
+const maxUploadNameBytes = 200
+
+// truncateUTF8 caps s at max bytes without splitting a multi-byte rune, which
+// would leave an invalid UTF-8 tail in the stored name.
+func truncateUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func contentDisposition(filename string) string {
@@ -276,6 +287,3 @@ func contentDisposition(filename string) string {
 	}, filename)
 	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, ascii, url.PathEscape(filename))
 }
-
-// errorsIsRequestEntityTooLarge — sentinel helper kept for future use.
-var _ = errors.New

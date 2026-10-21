@@ -25,6 +25,7 @@ func newTestAPI(t *testing.T) (*API, *chi.Mux) {
 	}
 	t.Cleanup(func() { st.Close() })
 	api := &API{Store: st, Hub: NewHub(), Locks: NewLockManager(5 * time.Second), SlugLen: 16}
+	api.AttachLockEvents()
 	r := chi.NewRouter()
 	r.Post("/api/sessions", api.CreateSession)
 	r.Get("/api/sessions/{slug}", api.GetSession)
@@ -325,9 +326,7 @@ func TestUpdateTooLargeReturns413(t *testing.T) {
 	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "big"}); err != nil {
 		t.Fatal(err)
 	}
-	old := MaxContentSize
-	MaxContentSize = 5
-	t.Cleanup(func() { MaxContentSize = old })
+	api.MaxContentSize = 5
 	w := doJSON(t, r, http.MethodPut, "/api/sessions/big", updateReq{Content: "123456"})
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("want 413, got %d body=%s", w.Code, w.Body.String())

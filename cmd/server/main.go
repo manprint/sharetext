@@ -58,9 +58,6 @@ func main() {
 			log.Fatalf("ADMIN_PASS_HASH is not a valid bcrypt hash: %v", err)
 		}
 	}
-	handlers.MaxFileSize = cfg.MaxFileSize
-	handlers.MaxContentSize = cfg.MaxContentSize
-	handlers.WSReadTimeout = cfg.WSReadTimeout
 	metrics := telemetry.NewMetrics(cfg.MetricsEnabled)
 
 	st, err := store.OpenWithOptions(cfg.DBPath, cfg.storeOptions())
@@ -77,7 +74,11 @@ func main() {
 		Metrics:              metrics,
 		AuditLogDefaultLimit: cfg.AuditLogDefaultLimit,
 		AllowedOrigins:       cfg.AllowedOrigins,
+		MaxContentSize:       cfg.MaxContentSize,
+		MaxFileSize:          cfg.MaxFileSize,
+		WSReadTimeout:        cfg.WSReadTimeout,
 	}
+	api.AttachLockEvents()
 
 	tplFS, err := fs.Sub(assets, "templates")
 	if err != nil {
@@ -263,14 +264,14 @@ func main() {
 
 	go func() {
 		adminMode := "disabled"
-		if cfg.AdminUser != "" && cfg.AdminPass != "" {
+		if cfg.AdminUser != "" && (cfg.AdminPass != "" || cfg.AdminPassHash != "") {
 			adminMode = "enabled (user=" + cfg.AdminUser + ")"
 		}
 		vacuumMode := "disabled"
 		if cfg.VacuumInterval > 0 {
 			vacuumMode = cfg.VacuumInterval.String()
 		}
-		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, vacuum=%s, admin=%s, lock_ttl=%s, max_file=%dB, max_content=%dB, file_backend=%s)", version.Version, cfg.Port, cfg.DBPath, cfg.CleanupInterval, vacuumMode, adminMode, cfg.LockTTL, handlers.MaxFileSize, handlers.MaxContentSize, cfg.FileStorageBackend)
+		log.Printf("sharetext %s listening on :%s (db=%s, cleanup=%s, vacuum=%s, admin=%s, lock_ttl=%s, max_file=%dB, max_content=%dB, file_backend=%s)", version.Version, cfg.Port, cfg.DBPath, cfg.CleanupInterval, vacuumMode, adminMode, cfg.LockTTL, cfg.MaxFileSize, cfg.MaxContentSize, cfg.FileStorageBackend)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}

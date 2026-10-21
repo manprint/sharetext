@@ -69,9 +69,9 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		VacuumInterval:          durationEnv(getenv, "VACUUM_INTERVAL", 0, 0),
 		LockTTL:                 durationEnv(getenv, "LOCK_TTL", handlers.DefaultLockTTL, time.Second),
 		LockIdleRelease:         durationEnv(getenv, "LOCK_IDLE_RELEASE", 3*time.Second, time.Second),
-		WSReadTimeout:           durationEnv(getenv, "WS_READ_TIMEOUT", 90*time.Second, time.Second),
-		MaxFileSize:             int64Env(getenv, "MAX_FILE_SIZE", handlers.MaxFileSize),
-		MaxContentSize:          int64Env(getenv, "MAX_CONTENT_SIZE", handlers.MaxContentSize),
+		WSReadTimeout:           durationEnv(getenv, "WS_READ_TIMEOUT", handlers.DefaultWSReadTimeout, time.Second),
+		MaxFileSize:             positiveInt64Env(getenv, "MAX_FILE_SIZE", handlers.DefaultMaxFileSize),
+		MaxContentSize:          positiveInt64Env(getenv, "MAX_CONTENT_SIZE", handlers.DefaultMaxContentSize),
 		MaxFilesPerSession:      intEnv(getenv, "MAX_FILES_PER_SESSION", 256),
 		MaxSessionStorageBytes:  int64Env(getenv, "MAX_SESSION_STORAGE_BYTES", 100*1024*1024),
 		FileStorageBackend:      envOrWith(getenv, "FILE_STORAGE_BACKEND", store.FileBackendDB),
@@ -140,6 +140,15 @@ func int64Env(getenv func(string) string, key string, def int64) int64 {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
 			return n
 		}
+	}
+	return def
+}
+
+// positiveInt64Env is int64Env for limits where zero is not meaningful (a
+// zero upload or content cap would reject every request).
+func positiveInt64Env(getenv func(string) string, key string, def int64) int64 {
+	if n := int64Env(getenv, key, def); n > 0 {
+		return n
 	}
 	return def
 }
