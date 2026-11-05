@@ -53,6 +53,10 @@ test-race:
 test-js:
     node --test cmd/server/static/*.test.mjs
 
+# Browser end-to-end tests (throwaway server; needs `npm ci` + browser in e2e/)
+test-e2e:
+    cd e2e && ./run.sh
+
 # Run all tests
 test-all: test test-js
 

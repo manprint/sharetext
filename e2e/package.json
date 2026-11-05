@@ -1,0 +1,12 @@
+{
+  "name": "sharetext-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser end-to-end tests for sharetext (see run.sh)",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 *.e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.0"
+  }
+}

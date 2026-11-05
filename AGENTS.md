@@ -12,6 +12,7 @@ Use [Just](https://github.com/casey/just) recipes where possible:
 - `just build` creates the `sharetext-server` binary; set `VERSION=v1.2.3` to embed a version.
 - `just test` runs all Go tests; `just test-race` adds the race detector.
 - `just test-js` runs browser-module tests with Node’s built-in `node:test`; `just test-all` runs both suites.
+- `just test-e2e` runs the browser suite in `e2e/` against a throwaway server (first `cd e2e && npm ci && npx playwright-core install --only-shell chromium`); `SHARETEXT_URL=… npm test` targets a running instance.
 - `just vet` runs `go vet ./...`; `just fmt` applies `gofmt`.
 - `just up`, `just logs`, `just smoke`, and `just down` build, inspect, health-check, and stop the Compose stack.
 

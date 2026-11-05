@@ -11,3 +11,4 @@ CLAUDE.md
 docs
 skills-lock.json
 .agents
+e2e/node_modules/
