@@ -31,10 +31,11 @@ import {
   decideInitialMode,
   classifyIncoming,
   isSafePlaintext,
+  pickWorkingKey,
   MODE_E2E,
   MODE_LOCKED,
 } from './e2e-state.js';
-import { downloadZip, uniqueEntryName } from './bundle-client.js';
+import { downloadZip, uniqueEntryName, sanitizeEntryName } from './bundle-client.js';
 import {
   classifyLock,
   canEditNow,
@@ -54,7 +55,7 @@ import {
   formatTimestamp,
 } from './commands.js';
 import { initOfflineGuard, setOfflineBanner } from './offline-guard.js';
-import { rememberPinnedSession, loadPinnedSession, savePinnedSession } from './pinning.js';
+import { rememberPinnedSession, loadPinnedSession, savePinnedSession, safeLocalStorage } from './pinning.js';
 import { createOutbox } from './outbox.js';
 import { createConnection } from './connection.js';
 
@@ -157,6 +158,32 @@ function setDecryptBanner(text) {
   $decryptBanner.textContent = text;
 }
 
+// Keys gathered at bootstrap, waiting for the first snapshot to tell which
+// one (if any) opens the session.
+let pendingKeys = [];
+
+// settleKey picks the session key from pendingKeys against the first
+// snapshot. Only a key that decrypts the content is remembered on this
+// device; a remembered key that no longer fits (changed password, recreated
+// slug) is forgotten. Without a fitting key ciphertext stays locked.
+async function settleKey(content) {
+  if (pendingKeys.length === 0) return;
+  const candidates = pendingKeys;
+  pendingKeys = [];
+  const winner = await pickWorkingKey(content, candidates, decryptText);
+  cryptoKey = winner ? winner.key : null;
+  const storage = safeLocalStorage();
+  if (winner) {
+    // Content that is not ciphertext cannot vouch for a key: use it for this
+    // page, but never let it replace a key already remembered here.
+    if (isCiphertext(content) || !candidates.some((c) => c.pinned)) {
+      rememberPinnedSession(storage, slug, winner.b64);
+    }
+  } else if (isCiphertext(content) && candidates.some((c) => c.pinned)) {
+    savePinnedSession(storage, slug, null);
+  }
+}
+
 function determineSessionMode(initialContent) {
   sessionMode = decideInitialMode(initialContent, cryptoKey != null);
 }
@@ -179,23 +206,23 @@ async function decryptIncoming(content) {
     return decision.plain;
   }
   if (decision.kind === 'locked') {
-    lockedCiphertext = content;
-    if (sessionMode !== MODE_LOCKED) {
-      sessionMode = MODE_LOCKED;
-    }
-    applyModeUI();
+    enterLockedMode(content);
     return null;
   }
-  // decrypt-attempt
-  if (sessionMode !== MODE_E2E) {
-    sessionMode = MODE_E2E;
-    applyModeUI();
-  }
+  // decrypt-attempt: switch to e2e only once the key has proven itself.
   let plain;
   try {
     plain = await decryptText(cryptoKey, content);
   } catch {
+    // Wrong key: an editable e2e editor here would overwrite the real
+    // ciphertext with text encrypted under the wrong key on the first
+    // keystroke. Lock instead and offer the unlock form.
+    enterLockedMode(content);
     return null;
+  }
+  if (sessionMode !== MODE_E2E) {
+    sessionMode = MODE_E2E;
+    applyModeUI();
   }
   // Defense-in-depth: decryptText returning a ciphertext-prefixed string is
   // impossible by construction, but if a future bug ever made it possible,
@@ -223,6 +250,30 @@ const outbox = createOutbox({
   encode: (text) => encryptOutgoing(text),
   deliver: (wire, opts) => deliverEdit(wire, opts),
 });
+
+// enterLockedMode makes the session read-only behind the unlock form: the key
+// is dropped, unsent edits are discarded, a held editor lock is released and
+// the editor no longer shows text from before the content became unreadable.
+function enterLockedMode(ciphertext) {
+  lockedCiphertext = ciphertext;
+  cryptoKey = null;
+  if (sessionMode === MODE_LOCKED) {
+    applyModeUI();
+    return;
+  }
+  sessionMode = MODE_LOCKED;
+  clearTimeout(debounceTimer);
+  outbox.revert();
+  if ($content.value !== '') {
+    suppressSend = true;
+    $content.value = '';
+    suppressSend = false;
+    renderItems('');
+  }
+  outbox.remoteApplied('');
+  if (lockState === LOCK_STATE_MINE) wsSend({ type: 'lock_release' });
+  applyModeUI();
+}
 
 function applyModeUI() {
   if (sessionMode === 'locked') {
@@ -256,7 +307,9 @@ if ($unlockForm) {
     try {
       const key = await deriveKeyFromPassphrase(pass, slug);
       await decryptText(key, lockedCiphertext);
-      rememberPinnedSession(window.localStorage, slug, await exportKey(key));
+      rememberPinnedSession(safeLocalStorage(), slug, await exportKey(key));
+      // A wrong #k= in the URL would otherwise be tried again after reload.
+      history.replaceState(null, '', location.pathname + location.search);
       location.reload();
     } catch {
       $unlockError.textContent = 'Password errata.';
@@ -445,7 +498,7 @@ function renderFileRow(li, num, fm) {
   // yet, fall back to a placeholder rather than printing the ciphertext.
   const displayName =
     (cached && cached.name) ||
-    (isEncryptedName(fm.encodedName) ? '(allegato cifrato)' : fm.name);
+    (sessionMode !== 'plain' && isEncryptedName(fm.encodedName) ? '(allegato cifrato)' : fm.name);
 
   const name = document.createElement('span');
   name.className = 'file-name';
@@ -547,6 +600,7 @@ async function applyRemote(rawContent, { initialSnapshot = false } = {}) {
 }
 
 let fileMetaInFlight = null;
+const fileMetaMissing = new Set();
 async function refreshMarkerNamesIfStale(plainText) {
   if (sessionMode !== 'e2e' || !cryptoKey) return;
   const markers = extractFileMarkers(plainText);
@@ -582,17 +636,21 @@ async function refreshMarkerNamesIfStale(plainText) {
 async function refreshFileMetaIfStale(plainText) {
   await refreshMarkerNamesIfStale(plainText);
   const ids = extractMarkerIds(plainText);
-  let stale = false;
-  for (const id of ids) {
+  const unknown = (id) => {
     const cached = fileMetaCache.get(id);
-    if (!cached || !Number.isFinite(cached.size)) { stale = true; break; }
-  }
-  if (!stale) return;
+    return !cached || !Number.isFinite(cached.size);
+  };
+  if (!ids.some((id) => unknown(id) && !fileMetaMissing.has(id))) return;
   // Single in-flight refresh; concurrent edits coalesce.
   if (!fileMetaInFlight) {
     fileMetaInFlight = (async () => {
-      try { await loadFileMeta(); }
-      finally { fileMetaInFlight = null; }
+      try {
+        if (await loadFileMeta()) {
+          // Markers the server does not know (deleted file, hand-typed
+          // marker) must not refetch the list on every keystroke.
+          for (const id of ids) if (unknown(id)) fileMetaMissing.add(id);
+        }
+      } finally { fileMetaInFlight = null; }
       // Re-render so newly cached names/sizes land in the rows.
       renderItems($content.value);
     })();
@@ -695,7 +753,7 @@ function scheduleIdleRelease() {
 
 function updateLockUI() {
   const locked = lockState === LOCK_STATE_THEIRS;
-  const blocked = locked || isOffline || isLockedForEditing();
+  const blocked = locked || isOffline || expiredHandled || isLockedForEditing();
   if ($editPane) $editPane.classList.toggle('locked-by-other', locked);
   if ($content) {
     $content.readOnly = blocked;
@@ -775,6 +833,8 @@ function handleExpired() {
   hideMenu();
   $content.disabled = true;
   $copyAll.disabled = true;
+  if ($uploadBtn) $uploadBtn.disabled = true;
+  if ($downloadAll) $downloadAll.disabled = true;
   if ($lockBadge) { $lockBadge.hidden = true; $lockBadge.textContent = ''; }
   if ($countdown) {
     $countdown.textContent = 'Scaduta';
@@ -901,6 +961,7 @@ async function handleServerMessage(msg) {
   // finished settling the session mode (e.g. WS hello races the initial
   // GET on first load). Settle it now if still pending.
   if (initialSnapshot && sessionMode === 'pending' && typeof msg.content === 'string') {
+    await settleKey(msg.content);
     determineSessionMode(msg.content);
     applyModeUI();
   }
@@ -1238,22 +1299,39 @@ if ($downloadAll) {
       // Session text decrypted from the editor buffer (already plaintext).
       entries.push({ name: `${slug}.txt`, data: new TextEncoder().encode($content.value) });
       const usedNames = new Set();
-      for (const [id, meta] of fileMetaCache.entries()) {
-        const r = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files/${encodeURIComponent(id)}`);
-        if (!r.ok) throw new Error(`fetch ${id}: ${r.status}`);
-        const ct = new Uint8Array(await r.arrayBuffer());
-        const pt = await decryptBytes(cryptoKey, ct);
-        const safeName = (meta.name || `file-${id}.bin`).replace(/[\\/]/g, '_');
-        // Two attachments may share a name; a zip with duplicate entries
-        // makes extractors silently keep only one of them.
-        entries.push({ name: `files/${uniqueEntryName(safeName, usedNames)}`, data: pt });
+      // The server's list, not the marker cache: the cache also holds ids of
+      // markers whose file does not exist, which would abort the whole zip.
+      const lr = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files`);
+      if (!lr.ok) throw new Error(`list: ${lr.status}`);
+      const list = (await lr.json()).files || [];
+      let skipped = 0;
+      for (const f of list) {
+        try {
+          const r = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files/${encodeURIComponent(f.id)}`);
+          if (!r.ok) throw new Error(`fetch ${f.id}: ${r.status}`);
+          const pt = await decryptBytes(cryptoKey, new Uint8Array(await r.arrayBuffer()));
+          let name = fileMetaCache.get(f.id)?.name;
+          if (!name || name === '(allegato cifrato)') {
+            name = isEncryptedName(f.filename)
+              ? await decryptName(cryptoKey, f.filename).catch(() => '')
+              : f.filename;
+          }
+          const safeName = sanitizeEntryName(name, `file-${f.id}.bin`);
+          // Two attachments may share a name; a zip with duplicate entries
+          // makes extractors silently keep only one of them.
+          entries.push({ name: `files/${uniqueEntryName(safeName, usedNames)}`, data: pt });
+        } catch (err) {
+          console.warn('e2e bundle: skipping file', f.id, err);
+          skipped++;
+        }
       }
       downloadZip(`${slug}.zip`, entries);
+      if (skipped) toast(`${skipped} allegat${skipped === 1 ? 'o' : 'i'} non decifrabil${skipped === 1 ? 'e' : 'i'}, esclus${skipped === 1 ? 'o' : 'i'}`);
     } catch (err) {
       console.error('e2e bundle failed', err);
       toast('Pacchetto fallito');
     } finally {
-      $downloadAll.disabled = false;
+      $downloadAll.disabled = expiredHandled;
     }
   });
 }
@@ -1472,7 +1550,7 @@ window.addEventListener('drop', (e) => { if (e.dataTransfer && e.dataTransfer.fi
 async function loadFileMeta() {
   try {
     const res = await fetch(`/api/sessions/${encodeURIComponent(slug)}/files`);
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const data = await res.json();
     const e2e = sessionMode === 'e2e' && cryptoKey;
     for (const f of data.files || []) {
@@ -1492,9 +1570,13 @@ async function loadFileMeta() {
         mime: f.mime,
         encryptedName: encName,
       });
+      fileMetaMissing.delete(f.id);
     }
     renderItems($content.value);
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Bootstrap: import the URL-fragment key (if any) BEFORE the initial fetch
@@ -1504,25 +1586,21 @@ async function loadFileMeta() {
 (async () => {
   applyModeUI(); // show "Decifratura…" while we work
 
-  let pinKey = null;
+  // Candidate keys, best first: the URL fragment, then a key remembered on
+  // this device (password sessions, or a link already opened here). None is
+  // trusted or remembered until it has opened the session's ciphertext.
+  const storage = safeLocalStorage();
   const keyB64 = parseKeyFromHash();
   if (keyB64) {
-    try { cryptoKey = await importKey(keyB64); }
-    catch (err) {
-      console.warn('failed to import key from URL fragment', err);
-      cryptoKey = null;
-    }
-    if (cryptoKey) pinKey = keyB64;
-  } else {
-    // No fragment: fall back to a key remembered on this device (password
-    // sessions, or a link already opened here).
-    const pinned = loadPinnedSession(window.localStorage, slug);
-    if (pinned && pinned.key) {
-      try { cryptoKey = await importKey(pinned.key); pinKey = pinned.key; }
-      catch { cryptoKey = null; }
-    }
+    try { pendingKeys.push({ key: await importKey(keyB64), b64: keyB64, pinned: false }); }
+    catch (err) { console.warn('failed to import key from URL fragment', err); }
   }
-  rememberPinnedSession(window.localStorage, slug, pinKey);
+  const pinned = loadPinnedSession(storage, slug);
+  if (pinned && pinned.key && pinned.key !== keyB64) {
+    try { pendingKeys.push({ key: await importKey(pinned.key), b64: pinned.key, pinned: true }); }
+    catch {}
+  }
+  rememberPinnedSession(storage, slug, null);
 
   let snapshot = null;
   try {
@@ -1537,18 +1615,8 @@ async function loadFileMeta() {
     console.error('initial fetch failed', err);
   }
 
-  if (snapshot && cryptoKey && !keyB64 && isCiphertext(snapshot.content)) {
-    // A remembered key that no longer opens the session (changed password,
-    // recreated slug) must not stay pinned: fall back to the unlock form.
-    try { await decryptText(cryptoKey, snapshot.content); }
-    catch {
-      cryptoKey = null;
-      pinKey = null;
-      savePinnedSession(window.localStorage, slug, null);
-    }
-  }
-
   if (snapshot) {
+    await settleKey(typeof snapshot.content === 'string' ? snapshot.content : '');
     determineSessionMode(typeof snapshot.content === 'string' ? snapshot.content : '');
     applyModeUI();
     await applySessionPayload(snapshot, { initialSnapshot: true });

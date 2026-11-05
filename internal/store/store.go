@@ -17,6 +17,7 @@ var (
 	ErrExpired                = errors.New("session expired")
 	ErrTooManyFiles           = errors.New("too many files in session")
 	ErrSessionStorageExceeded = errors.New("session storage limit exceeded")
+	ErrStorageFull            = errors.New("server storage full")
 )
 
 type Session struct {
@@ -237,6 +238,14 @@ func (s *Store) Get(ctx context.Context, slug string) (*Session, error) {
 }
 
 func (s *Store) Update(ctx context.Context, slug, content string) (*Session, error) {
+	return s.UpdateWithin(ctx, slug, content, nil)
+}
+
+// UpdateWithin is Update with a server-wide quota hook: when the new content
+// is larger than the stored one, allowGrowth must approve the extra bytes or
+// the update fails with ErrStorageFull. Shrinking edits are always allowed, so
+// a full server can still be cleaned up.
+func (s *Store) UpdateWithin(ctx context.Context, slug, content string, allowGrowth func(delta int64) bool) (*Session, error) {
 	return retryOnBusy(func() (*Session, error) {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -250,6 +259,9 @@ func (s *Store) Update(ctx context.Context, slug, content string) (*Session, err
 		}
 		if s.opts.MaxSessionStorageBytes > 0 && int64(len(content))+stats.FilesSize > s.opts.MaxSessionStorageBytes {
 			return nil, ErrSessionStorageExceeded
+		}
+		if delta := int64(len(content)) - stats.ContentSize; delta > 0 && allowGrowth != nil && !allowGrowth(delta) {
+			return nil, ErrStorageFull
 		}
 		now := time.Now().UTC()
 		res, err := tx.ExecContext(ctx,

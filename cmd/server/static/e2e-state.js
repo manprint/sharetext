@@ -63,3 +63,21 @@ export function isSafePlaintext(value) {
   if (typeof value !== "string") return false;
   return !value.startsWith(ENC_PREFIX);
 }
+
+/**
+ * Pick the first candidate key that opens `content`. Ciphertext is
+ * test-decrypted with `tryDecrypt(key, content)` (which must throw on a wrong
+ * key); anything else cannot prove a key wrong, so the first candidate wins.
+ * Returns the winning candidate object, or null when none fits.
+ */
+export async function pickWorkingKey(content, candidates, tryDecrypt) {
+  const usable = (candidates || []).filter((c) => c && c.key);
+  if (!isCiphertext(content)) return usable[0] || null;
+  for (const c of usable) {
+    try {
+      await tryDecrypt(c.key, content);
+      return c;
+    } catch {}
+  }
+  return null;
+}

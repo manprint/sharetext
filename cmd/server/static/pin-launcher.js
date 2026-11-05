@@ -1,4 +1,4 @@
-import { resolvePinnedLaunch } from './pinning.js';
+import { resolvePinnedLaunch, safeLocalStorage } from './pinning.js';
 
 const slug = document.body.dataset.slug || '';
 const $status = document.getElementById('launch-status');
@@ -13,7 +13,7 @@ function showMissingPinMessage(redirectURL) {
   $open.href = redirectURL;
 }
 
-const resolved = resolvePinnedLaunch(window.localStorage, slug);
+const resolved = resolvePinnedLaunch(safeLocalStorage(), slug);
 if (!resolved.found) {
   showMissingPinMessage(resolved.redirectURL);
 } else {

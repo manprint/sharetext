@@ -141,7 +141,7 @@ func (a *API) AdminList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// AdminDelete removes a session permanently. Returns 204 on success, 404 when
+// AdminDelete removes a session permanently. Returns 200 with {"deleted": slug}, 404 when
 // the session is unknown.
 func (a *API) AdminDelete(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")

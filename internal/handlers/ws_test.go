@@ -747,3 +747,31 @@ func TestWSRejectsOversizedMessage(t *testing.T) {
 		t.Fatalf("want close status %d, got %d (err=%v)", websocket.StatusMessageTooBig, status, err)
 	}
 }
+
+func TestWSEditRejectedWhenServerFull(t *testing.T) {
+	srv, api := newWSServer(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "full"}); err != nil {
+		t.Fatal(err)
+	}
+	api.MaxTotalStorageBytes = 1
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "full"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	readJSON(t, ctx, c)
+	body, _ := json.Marshal(wsMsg{Type: "edit", Content: "grows past the limit", Seq: 4})
+	if err := c.Write(ctx, websocket.MessageText, body); err != nil {
+		t.Fatal(err)
+	}
+	ev := readUntil(t, ctx, c, "edit_rejected", "ack")
+	if ev.Type != "edit_rejected" || ev.Seq != 4 {
+		t.Fatalf("growth on a full server must be rejected, got %+v", ev)
+	}
+	sess, err := api.Store.Get(context.Background(), "full")
+	if err != nil || sess.Content != "" {
+		t.Fatalf("content must stay unchanged: %q %v", sess.Content, err)
+	}
+}

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildZip, uniqueEntryName } from "./bundle-client.js";
+import { buildZip, uniqueEntryName, sanitizeEntryName } from "./bundle-client.js";
 import { execFileSync } from "node:child_process";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -110,4 +110,15 @@ test("uniqueEntryName: keeps distinct names and numbers duplicates", () => {
   uniqueEntryName("a (2).txt", used2);
   uniqueEntryName("a.txt", used2);
   assert.equal(uniqueEntryName("a.txt", used2), "a (3).txt");
+});
+
+test("sanitizeEntryName strips paths and control chars, never empty", () => {
+  assert.equal(sanitizeEntryName("../../etc/passwd", "f.bin"), ".._.._etc_passwd");
+  assert.equal(sanitizeEntryName("a\\b.txt", "f.bin"), "a_b.txt");
+  assert.equal(sanitizeEntryName("bad\u0000\u001fname\u007f.txt", "f.bin"), "badname.txt");
+  assert.equal(sanitizeEntryName("..", "f.bin"), "f.bin");
+  assert.equal(sanitizeEntryName(".", "f.bin"), "f.bin");
+  assert.equal(sanitizeEntryName("  ", "f.bin"), "f.bin");
+  assert.equal(sanitizeEntryName(null, "f.bin"), "f.bin");
+  assert.equal(sanitizeEntryName("report.pdf", "f.bin"), "report.pdf");
 });

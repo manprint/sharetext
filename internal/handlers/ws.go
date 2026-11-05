@@ -202,7 +202,7 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			sess, err := a.Store.Update(ctx, slug, m.Content)
+			sess, err := a.Store.UpdateWithin(ctx, slug, m.Content, a.growthAllowed(ctx))
 			if err != nil {
 				if a.Locks != nil {
 					a.Locks.announce(slug)
@@ -214,7 +214,7 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				reason := "internal error"
-				if errors.Is(err, store.ErrSessionStorageExceeded) {
+				if errors.Is(err, store.ErrSessionStorageExceeded) || errors.Is(err, store.ErrStorageFull) {
 					reason = err.Error()
 				}
 				writeBack(wsEditRejected{Type: "edit_rejected", Error: reason, Seq: m.Seq})

@@ -233,7 +233,7 @@ func (a *API) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		defer a.Locks.announce(slug)
 	}
 
-	sess, err := a.Store.Update(r.Context(), slug, body.Content)
+	sess, err := a.Store.UpdateWithin(r.Context(), slug, body.Content, a.growthAllowed(r.Context()))
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -319,6 +319,8 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 		http.Error(w, "session expired", http.StatusGone)
 	case errors.Is(err, store.ErrTooManyFiles), errors.Is(err, store.ErrSessionStorageExceeded):
 		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+	case errors.Is(err, store.ErrStorageFull):
+		http.Error(w, err.Error(), http.StatusInsufficientStorage)
 	default:
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}

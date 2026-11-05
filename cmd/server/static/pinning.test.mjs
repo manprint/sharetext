@@ -9,6 +9,7 @@ import {
   savePinnedSession,
   rememberPinnedSession,
   resolvePinnedLaunch,
+  safeLocalStorage,
 } from './pinning.js';
 
 function makeStorage() {
@@ -96,4 +97,13 @@ test('a null re-save does not clear a stored key via rememberPinnedSession', () 
   savePinnedSession(storage, 'room-abc', 'AbC_123-xyz');
   rememberPinnedSession(storage, 'room-abc', null);
   assert.equal(loadPinnedSession(storage, 'room-abc').key, 'AbC_123-xyz');
+});
+
+test('safeLocalStorage: throwing getter yields null', () => {
+  const scope = {};
+  Object.defineProperty(scope, 'localStorage', { get() { throw new Error('SecurityError'); } });
+  assert.equal(safeLocalStorage(scope), null);
+  const storage = makeStorage();
+  assert.equal(safeLocalStorage({ localStorage: storage }), storage);
+  assert.equal(safeLocalStorage({}), null);
 });

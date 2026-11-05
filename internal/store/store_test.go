@@ -449,3 +449,47 @@ func TestPing(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestUpdateWithinGrowthHook(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, CreateOpts{Slug: "grow1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Update(ctx, "grow1", "12345"); err != nil {
+		t.Fatal(err)
+	}
+	var asked int64
+	deny := func(d int64) bool { asked = d; return false }
+	if _, err := s.UpdateWithin(ctx, "grow1", "1234567", deny); !errors.Is(err, ErrStorageFull) {
+		t.Fatalf("growth: want ErrStorageFull, got %v", err)
+	}
+	if asked != 2 {
+		t.Fatalf("delta: want 2, got %d", asked)
+	}
+	asked = 0
+	if _, err := s.UpdateWithin(ctx, "grow1", "123", deny); err != nil {
+		t.Fatalf("shrink must pass: %v", err)
+	}
+	if asked != 0 {
+		t.Fatal("hook must not run for shrinking edits")
+	}
+}
+
+func TestAddFileBumpsUpdatedAt(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, CreateOpts{Slug: "idle1", Name: "idle"}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour).Unix()
+	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE slug = ?`, old, "idle1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddFile(ctx, "idle1", "fileid000001", "a.txt", "text/plain", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.DeleteIdlePersistent(ctx, time.Now().Add(-24*time.Hour)); err != nil || n != 0 {
+		t.Fatalf("upload must count as activity: n=%d err=%v", n, err)
+	}
+}

@@ -78,3 +78,13 @@ export function resolvePinnedLaunch(storage, slug) {
     redirectURL: buildPinnedSessionURL(slug, entry ? entry.key : null),
   };
 }
+// safeLocalStorage returns the scope's localStorage, or null when reading the
+// property itself throws (blocked storage, sandboxed iframe, some private
+// modes): callers then work without remembered keys instead of crashing.
+export function safeLocalStorage(scope = globalThis) {
+  try {
+    return scope.localStorage || null;
+  } catch {
+    return null;
+  }
+}

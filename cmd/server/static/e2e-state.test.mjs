@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { generateKey, encryptText, ENC_PREFIX } from "./crypto.js";
+import { generateKey, encryptText, decryptText, ENC_PREFIX } from "./crypto.js";
 import {
   decideInitialMode,
   classifyIncoming,
   isSafePlaintext,
+  pickWorkingKey,
   MODE_E2E,
   MODE_LOCKED,
   MODE_PLAIN,
@@ -123,4 +124,38 @@ test("regression: ciphertext content in classifyIncoming must NEVER be returned 
   // And isSafePlaintext rejects the raw string, so even if the cipher path
   // somehow returned it as "plain", applyRemote would refuse to write it.
   assert.equal(isSafePlaintext(looksLikeCipher), false);
+});
+
+// ─────────────────────────── pickWorkingKey ─────────────────────────────────
+
+test("pickWorkingKey: wrong hash key falls through to the pinned key", async () => {
+  const good = await generateKey();
+  const wrong = await generateKey();
+  const ct = await encryptText(good, "secret");
+  const hash = { key: wrong, source: "hash" };
+  const pinned = { key: good, source: "pin" };
+  assert.equal(await pickWorkingKey(ct, [hash, pinned], decryptText), pinned);
+});
+
+test("pickWorkingKey: good hash key wins over a stale pinned key", async () => {
+  const good = await generateKey();
+  const stale = await generateKey();
+  const ct = await encryptText(good, "secret");
+  const hash = { key: good, source: "hash" };
+  assert.equal(await pickWorkingKey(ct, [hash, { key: stale }], decryptText), hash);
+});
+
+test("pickWorkingKey: no candidate opens the ciphertext -> null", async () => {
+  const good = await generateKey();
+  const ct = await encryptText(good, "secret");
+  const cands = [{ key: await generateKey() }, { key: await generateKey() }];
+  assert.equal(await pickWorkingKey(ct, cands, decryptText), null);
+});
+
+test("pickWorkingKey: empty or plaintext content cannot reject, first usable wins", async () => {
+  const a = { key: await generateKey() };
+  const b = { key: await generateKey() };
+  assert.equal(await pickWorkingKey("", [null, { key: null }, a, b], decryptText), a);
+  assert.equal(await pickWorkingKey("hello", [a, b], decryptText), a);
+  assert.equal(await pickWorkingKey("", [], decryptText), null);
 });

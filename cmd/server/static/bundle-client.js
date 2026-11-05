@@ -53,6 +53,19 @@ function u32(view, off, v) { view.setUint32(off, v, true); }
  * @param {Set<string>} used
  * @returns {string}
  */
+/**
+ * Make a decrypted attachment name safe as a zip entry: no directory parts,
+ * no control characters, never empty, "." or "..". Falls back to `fallback`.
+ */
+export function sanitizeEntryName(name, fallback) {
+  const base = String(name || "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\\/]/g, "_")
+    .trim();
+  if (base === "" || base === "." || base === "..") return fallback;
+  return base;
+}
+
 export function uniqueEntryName(name, used) {
   let candidate = name;
   if (used.has(candidate.toLowerCase())) {

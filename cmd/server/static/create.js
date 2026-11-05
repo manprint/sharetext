@@ -4,7 +4,7 @@
  * so the resulting session is end-to-end encrypted by default.
  */
 import { generateKey, exportKey, deriveKeyFromPassphrase, encryptText, MIN_PASSPHRASE_LENGTH } from './crypto.js';
-import { savePinnedSession } from './pinning.js';
+import { savePinnedSession, safeLocalStorage } from './pinning.js';
 import { initOfflineGuard, setOfflineBanner } from './offline-guard.js';
 
 const form = document.getElementById('create-form');
@@ -64,11 +64,13 @@ if (form) {
       // Generate the per-session key BEFORE the network round-trip so a
       // slow Web Crypto call doesn't make the redirect feel laggy.
       let keyFragment = '';
+      let key = null;
       if (!passphrase) try {
-        const key = await generateKey();
+        key = await generateKey();
         const raw = await exportKey(key);
         keyFragment = '#k=' + raw;
       } catch (cryptoErr) {
+        key = null;
         // If Web Crypto is unavailable (very old browser, insecure context),
         // fall back to the legacy plaintext flow rather than break creation.
         console.warn('E2E key generation unavailable, falling back to plaintext session', cryptoErr);
@@ -84,18 +86,18 @@ if (form) {
         throw new Error(msg);
       }
       const data = await res.json();
-      if (passphrase) {
-        // The salt is the slug, so the key can only be derived now. Seed an
-        // encrypted empty body at once: an empty keyless session would be
+      // The password salt is the slug, so that key can only be derived now.
+      if (passphrase) key = await deriveKeyFromPassphrase(passphrase, data.slug);
+      if (key) {
+        // Seed an encrypted empty body at once: an empty session would be
         // treated as plaintext by the first peer who opens the bare link.
-        const key = await deriveKeyFromPassphrase(passphrase, data.slug);
         const seed = await fetch('/api/sessions/' + encodeURIComponent(data.slug), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: await encryptText(key, '') }),
         });
         if (!seed.ok) throw new Error('inizializzazione cifratura fallita (' + seed.status + ')');
-        savePinnedSession(window.localStorage, data.slug, await exportKey(key));
+        if (passphrase) savePinnedSession(safeLocalStorage(), data.slug, await exportKey(key));
       }
       window.location.href = data.url + keyFragment;
     } catch (e) {

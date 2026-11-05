@@ -64,6 +64,21 @@ func (a *API) storageFull(ctx context.Context, extra int64) bool {
 	return cur+extra > a.MaxTotalStorageBytes
 }
 
+// growthAllowed returns the Store.UpdateWithin hook enforcing the server-wide
+// storage limit on content that grows; nil when no limit is configured.
+func (a *API) growthAllowed(ctx context.Context) func(int64) bool {
+	if a.MaxTotalStorageBytes <= 0 || a.Store == nil {
+		return nil
+	}
+	return func(delta int64) bool {
+		if a.storageFull(ctx, delta) {
+			return false
+		}
+		a.noteStored(delta)
+		return true
+	}
+}
+
 func (a *API) noteStored(n int64) {
 	if a.MaxTotalStorageBytes > 0 {
 		a.limits().added.Add(n)

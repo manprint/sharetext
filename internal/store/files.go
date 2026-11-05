@@ -85,6 +85,10 @@ func (s *Store) AddFile(ctx context.Context, slug, id, filename, mime string, da
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO files (id, session_slug, filename, mime, size, data, created_at, storage_backend) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, slug, filename, mime, size, storedData, now.Unix(), backend)
+		if err == nil {
+			// An upload is activity: keep PERSISTENT_IDLE_TTL from reaping it.
+			_, err = tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE slug = ?`, now.Unix(), slug)
+		}
 		if err != nil {
 			if backend == FileBackendFS {
 				_ = s.removeFSFile(slug, id)

@@ -113,10 +113,7 @@ func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mime := part.Header.Get("Content-Type")
-	if mime == "" {
-		mime = "application/octet-stream"
-	}
+	mime := normalizeUploadMIME(part.Header.Get("Content-Type"))
 	filename := sanitizeUploadName(part.FileName())
 
 	id, err := session.NewSlug(store.FileIDLen)
@@ -298,7 +295,48 @@ func contentDisposition(filename string) string {
 		}
 		return r
 	}, filename)
-	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, ascii, url.PathEscape(filename))
+	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, ascii, rfc5987Escape(filename))
+}
+
+// rfc5987Escape percent-encodes everything outside RFC 5987 attr-char.
+// url.PathEscape is not enough: it leaves ':', '=', '@' and ',' bare, which
+// are not valid in an ext-value.
+func rfc5987Escape(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') ||
+			strings.IndexByte("!#$&+-.^_`|~", c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&15])
+	}
+	return b.String()
+}
+
+const maxUploadMIMEBytes = 255
+
+// normalizeUploadMIME turns the client-declared part Content-Type into a
+// canonical, bounded value; anything unparsable or oversized is stored as
+// application/octet-stream.
+func normalizeUploadMIME(declared string) string {
+	const fallback = "application/octet-stream"
+	mt, params, err := mime.ParseMediaType(declared)
+	if err != nil {
+		return fallback
+	}
+	out := mime.FormatMediaType(mt, params)
+	if out == "" || len(out) > maxUploadMIMEBytes {
+		out = mime.FormatMediaType(mt, nil)
+	}
+	if out == "" || len(out) > maxUploadMIMEBytes {
+		return fallback
+	}
+	return out
 }
 
 // activeContentTypes are types a browser would execute or render as a
