@@ -106,6 +106,17 @@ Conseguenze pratiche:
 - chi possiede il link completo puo' leggere la sessione;
 - se apri la sessione senza `#k=...`, la sessione cifrata entra in modalita' bloccata/sola lettura.
 
+#### Link pulito con password
+
+Alla creazione puoi impostare una **password** (min. 8 caratteri, da ripetere): il link resta `https://host/s/nome` senza `#k=`.
+
+- La chiave AES-256 e' derivata nel browser con PBKDF2-SHA256 (600k iterazioni), salt `sharetext:pass:v1:<slug>`; il formato `enc:v1` non cambia.
+- Chi apre il link vede il form "Sblocca"; con password errata la sessione resta in sola lettura.
+- La chiave derivata viene ricordata sul dispositivo (`localStorage`, come per i link `#k=`): la password si inserisce una volta per dispositivo.
+- Alla creazione il creator scrive subito un contenuto cifrato vuoto, cosi' la sessione non e' mai "vuota in chiaro".
+- Il salt e' pubblico: chi ottiene il DB puo' tentare la password offline. Usa password lunghe.
+- Senza password resta il comportamento classico (`#k=` nel link). Un link `#k=` aperto senza fragment su un dispositivo che l'ha gia' visto si sblocca con la chiave ricordata.
+
 ### Hardening applicativo
 
 - Header di sicurezza attivabili via env.
@@ -287,6 +298,11 @@ ADMIN_PASS_HASH=$2a$12$...
 | `MAX_CONTENT_SIZE` | `6291456` | Limite massimo del contenuto testuale della sessione (byte). | Vale su `PUT` e WebSocket. In sessioni cifrate considera l'overhead del ciphertext. `0` o valori invalidi → default. |
 | `MAX_FILES_PER_SESSION` | `256` | Numero massimo di allegati per sessione. | `0` disabilita il limite. |
 | `MAX_SESSION_STORAGE_BYTES` | `104857600` | Quota totale sessione: testo + allegati. | `0` disabilita il limite; utile per evitare che una singola sessione saturi il nodo. |
+| `MAX_TOTAL_STORAGE_BYTES` | `5368709120` | Quota globale testo + allegati. | Oltre: creazione/upload rispondono 507. `0` disabilita. |
+| `PERSISTENT_IDLE_TTL` | `2160h` | Cancella sessioni persistenti non aggiornate da questo tempo. | `0` disabilita. |
+| `UPLOAD_CONCURRENCY` | `4` | Upload simultanei massimi. | Oltre: 503 + `Retry-After`. |
+| `ADMIN_AUTH_MAX_FAILS` | `5` | Tentativi admin errati per IP prima del blocco. | `0` disabilita. Blocco: 429. |
+| `ADMIN_AUTH_LOCKOUT` | `15m` | Durata blocco admin. |  |
 
 ### Storage allegati e DB
 
@@ -1429,3 +1445,7 @@ compose.yaml               servizio con volume + build-arg + tutte le env
 Justfile                   ricette (run, build, test*, up, down, smoke)
 README.md                  questo file
 ```
+
+## Healthcheck
+
+`GET /healthz` risponde `ok` (503 se il DB non risponde). L'immagine include `HEALTHCHECK` nativo: `/app/sharetext healthcheck`.

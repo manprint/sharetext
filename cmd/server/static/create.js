@@ -3,14 +3,15 @@
  * AES-256-GCM key and tucks it into the URL fragment before redirecting,
  * so the resulting session is end-to-end encrypted by default.
  */
-import { generateKey, exportKey } from './crypto.js';
+import { generateKey, exportKey, deriveKeyFromPassphrase, encryptText, MIN_PASSPHRASE_LENGTH } from './crypto.js';
+import { savePinnedSession } from './pinning.js';
 import { initOfflineGuard, setOfflineBanner } from './offline-guard.js';
 
 const form = document.getElementById('create-form');
 if (form) {
   const err = document.getElementById('error');
   const modes = form.querySelectorAll('input[name="type"]');
-  const fields = form.querySelectorAll('.field');
+  const fields = form.querySelectorAll('.field[data-show-for]');
 
   function syncMode() {
     const sel = form.querySelector('input[name="type"]:checked').value;
@@ -45,11 +46,25 @@ if (form) {
       }
       payload.minutes = minutes;
     }
+    const passphrase = document.getElementById('passphrase').value;
+    const passphrase2 = document.getElementById('passphrase2').value;
+    if (passphrase || passphrase2) {
+      if (passphrase.length < MIN_PASSPHRASE_LENGTH) {
+        err.textContent = `Password troppo corta: minimo ${MIN_PASSPHRASE_LENGTH} caratteri.`;
+        err.hidden = false;
+        return;
+      }
+      if (passphrase !== passphrase2) {
+        err.textContent = 'Le due password non coincidono.';
+        err.hidden = false;
+        return;
+      }
+    }
     try {
       // Generate the per-session key BEFORE the network round-trip so a
       // slow Web Crypto call doesn't make the redirect feel laggy.
       let keyFragment = '';
-      try {
+      if (!passphrase) try {
         const key = await generateKey();
         const raw = await exportKey(key);
         keyFragment = '#k=' + raw;
@@ -69,6 +84,19 @@ if (form) {
         throw new Error(msg);
       }
       const data = await res.json();
+      if (passphrase) {
+        // The salt is the slug, so the key can only be derived now. Seed an
+        // encrypted empty body at once: an empty keyless session would be
+        // treated as plaintext by the first peer who opens the bare link.
+        const key = await deriveKeyFromPassphrase(passphrase, data.slug);
+        const seed = await fetch('/api/sessions/' + encodeURIComponent(data.slug), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: await encryptText(key, '') }),
+        });
+        if (!seed.ok) throw new Error('inizializzazione cifratura fallita (' + seed.status + ')');
+        savePinnedSession(window.localStorage, data.slug, await exportKey(key));
+      }
       window.location.href = data.url + keyFragment;
     } catch (e) {
       err.textContent = e.message;

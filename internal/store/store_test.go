@@ -396,3 +396,56 @@ func TestUpdateRespectsSessionStorageLimit(t *testing.T) {
 		t.Fatalf("want ErrSessionStorageExceeded, got %v", err)
 	}
 }
+
+func TestTotalBytesCountsTextAndFiles(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, CreateOpts{Slug: "q1"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.TotalBytes(ctx); err != nil || n != 0 {
+		t.Fatalf("empty: n=%d err=%v", n, err)
+	}
+	if _, err := s.Update(ctx, "q1", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddFile(ctx, "q1", "f1", "a.bin", "application/octet-stream", make([]byte, 100)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.TotalBytes(ctx); err != nil || n != 105 {
+		t.Fatalf("n=%d err=%v, want 105", n, err)
+	}
+}
+
+func TestDeleteIdlePersistent(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	exp := time.Now().Add(time.Hour)
+	for _, o := range []CreateOpts{{Slug: "old"}, {Slug: "tmp", ExpiresAt: &exp}} {
+		if _, err := s.Create(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET updated_at = ?`, time.Now().Add(-48*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create(ctx, CreateOpts{Slug: "fresh"}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.DeleteIdlePersistent(ctx, time.Now().Add(-24*time.Hour))
+	if err != nil || n != 1 {
+		t.Fatalf("deleted=%d err=%v, want 1", n, err)
+	}
+	for slug, want := range map[string]bool{"old": false, "tmp": true, "fresh": true} {
+		ok, _ := s.Exists(ctx, slug)
+		if ok != want {
+			t.Errorf("Exists(%s)=%v want %v", slug, ok, want)
+		}
+	}
+}
+
+func TestPing(t *testing.T) {
+	if err := openTest(t).Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

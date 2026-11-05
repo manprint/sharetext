@@ -45,6 +45,11 @@ type API struct {
 	MaxContentSize int64
 	MaxFileSize    int64
 	WSReadTimeout  time.Duration
+	// MaxTotalStorageBytes caps text+attachments across all sessions (0 = off).
+	MaxTotalStorageBytes int64
+	// UploadConcurrency caps parallel uploads (0 = DefaultUploadConcurrency).
+	UploadConcurrency int
+	lim               limitState
 }
 
 func (a *API) maxContentSize() int64 {
@@ -157,6 +162,10 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if a.storageFull(r.Context(), 0) {
+		http.Error(w, "server storage full", http.StatusInsufficientStorage)
+		return
+	}
 	slug, err := session.Compose(name, a.SlugLen)
 	if err != nil {
 		http.Error(w, "slug gen failed", http.StatusInternalServerError)

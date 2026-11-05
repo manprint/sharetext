@@ -40,6 +40,27 @@ body.offline .lock-badge.mine { opacity: 0.5; }
 }
 .decrypt-banner[hidden] { display: none; }
 
+.unlock-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 8px 10px;
+  background: var(--row-hover);
+  border-bottom: 1px solid var(--border);
+}
+.unlock-form[hidden] { display: none; }
+.unlock-form input {
+  font: inherit;
+  font-size: 16px; /* avoid iOS Safari focus zoom */
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.unlock-error { color: #b91c1c; font-size: 0.85rem; }
+.unlock-error[hidden] { display: none; }
+
 * { box-sizing: border-box; }
 
 html, body {

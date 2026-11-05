@@ -45,12 +45,19 @@
         <small class="hint">Compresa fra 1 minuto e 7 giorni (10080 min). Allo scadere viene cancellata definitivamente.</small>
       </div>
 
+      <div class="field">
+        <label for="passphrase">Password (opzionale)</label>
+        <input id="passphrase" name="passphrase" type="password" autocomplete="new-password" minlength="8">
+        <input id="passphrase2" name="passphrase2" type="password" autocomplete="new-password" minlength="8" placeholder="Ripeti password">
+        <small class="hint">Con password il link è pulito (<code>/s/nome</code>) e chi lo riceve inserisce la password. Senza password la chiave resta nel link dopo <code>#</code>. Minimo 8 caratteri: usa una password lunga.</small>
+      </div>
+
       <button type="submit" id="create-btn" class="primary">Crea sessione</button>
       <p id="error" class="error" hidden></p>
     </form>
     <p class="hint privacy-hint">
       Le sessioni create sono cifrate end-to-end: la chiave vive nella parte dopo <code>#</code> dell'URL
-      e non viene mai inviata al server. Chiunque riceva il link completo può leggere la sessione.
+      e non viene mai inviata al server. Chiunque riceva il link completo può leggere la sessione. Con una password il link non contiene la chiave.
     </p>
   </main>
 

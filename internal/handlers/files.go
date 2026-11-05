@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -58,54 +60,64 @@ func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	release, acquired := a.acquireUpload()
+	if !acquired {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "too many uploads in progress", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
 	clientID := strings.TrimSpace(r.Header.Get(ClientIDHeader))
 	if snap, allowed := a.tryWriteLock(slug, clientID, true); !allowed {
 		writeLockDenied(w, snap)
 		return
 	}
 	maxFile := a.maxFileSize()
-	// Reject oversize early via MaxBytesReader.
+	// Stream the multipart body instead of ParseMultipartForm, which would
+	// keep a second in-memory copy of the whole file.
 	r.Body = http.MaxBytesReader(w, r.Body, maxFile+512*1024) // +slack for multipart overhead
-	if err := r.ParseMultipartForm(maxFile + 512*1024); err != nil {
+	mr, err := r.MultipartReader()
+	if err != nil {
 		http.Error(w, "upload too large or malformed", http.StatusRequestEntityTooLarge)
 		return
 	}
-	fh, header, err := r.FormFile("file")
-	if err != nil {
-		http.Error(w, "missing 'file' field", http.StatusBadRequest)
+	var part *multipart.Part
+	for {
+		p, perr := mr.NextPart()
+		if perr == io.EOF {
+			http.Error(w, "missing 'file' field", http.StatusBadRequest)
+			return
+		}
+		if perr != nil {
+			http.Error(w, "upload too large or malformed", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if p.FormName() == "file" && p.FileName() != "" {
+			part = p
+			break
+		}
+		_ = p.Close()
+	}
+	defer part.Close()
+	buf, rerr := io.ReadAll(io.LimitReader(part, maxFile+1))
+	if rerr != nil {
+		http.Error(w, "upload too large or malformed", http.StatusRequestEntityTooLarge)
 		return
 	}
-	defer fh.Close()
-	if header.Size > maxFile {
+	if int64(len(buf)) > maxFile {
 		http.Error(w, "file exceeds max size", http.StatusRequestEntityTooLarge)
 		return
 	}
-
-	buf := make([]byte, 0, header.Size)
-	tmp := make([]byte, 32*1024)
-	for {
-		n, rerr := fh.Read(tmp)
-		if n > 0 {
-			if int64(len(buf)+n) > maxFile {
-				http.Error(w, "file exceeds max size", http.StatusRequestEntityTooLarge)
-				return
-			}
-			buf = append(buf, tmp[:n]...)
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			http.Error(w, "read failed", http.StatusInternalServerError)
-			return
-		}
+	if a.storageFull(r.Context(), int64(len(buf))) {
+		http.Error(w, "server storage full", http.StatusInsufficientStorage)
+		return
 	}
 
-	mime := header.Header.Get("Content-Type")
+	mime := part.Header.Get("Content-Type")
 	if mime == "" {
 		mime = "application/octet-stream"
 	}
-	filename := sanitizeUploadName(header.Filename)
+	filename := sanitizeUploadName(part.FileName())
 
 	id, err := session.NewSlug(store.FileIDLen)
 	if err != nil {
@@ -118,6 +130,7 @@ func (a *API) UploadFile(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
+	a.noteStored(int64(len(buf)))
 	if a.Metrics != nil {
 		a.Metrics.IncFilesUploaded()
 	}
@@ -136,7 +149,7 @@ func (a *API) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	if a.Metrics != nil {
 		a.Metrics.IncFileDownloads()
 	}
-	w.Header().Set("Content-Type", f.MIME)
+	w.Header().Set("Content-Type", downloadContentType(f.MIME))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", f.Size))
 	w.Header().Set("Content-Disposition", contentDisposition(f.Filename))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -286,4 +299,30 @@ func contentDisposition(filename string) string {
 		return r
 	}, filename)
 	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, ascii, url.PathEscape(filename))
+}
+
+// activeContentTypes are types a browser would execute or render as a
+// document when opened from our origin. Served as opaque bytes instead.
+var activeContentTypes = map[string]bool{
+	"text/html":                true,
+	"application/xhtml+xml":    true,
+	"image/svg+xml":            true,
+	"text/xml":                 true,
+	"application/xml":          true,
+	"text/javascript":          true,
+	"application/javascript":   true,
+	"application/x-javascript": true,
+	"text/css":                 true,
+	"application/pdf":          true,
+}
+
+// downloadContentType returns the Content-Type to serve for an upload: the
+// client-declared one, except active types (and anything unparsable), which
+// become application/octet-stream.
+func downloadContentType(declared string) string {
+	mt, _, err := mime.ParseMediaType(declared)
+	if err != nil || activeContentTypes[strings.ToLower(mt)] {
+		return "application/octet-stream"
+	}
+	return declared
 }

@@ -15,6 +15,8 @@ import {
   b64urlEncode,
   b64urlDecode,
   ENC_PREFIX,
+  deriveKeyFromPassphrase,
+  KDF_ITERATIONS,
 } from "./crypto.js";
 
 test("generateKey + export/import roundtrip yields equivalent material", async () => {
@@ -106,4 +108,44 @@ test("base64url helpers roundtrip arbitrary bytes", () => {
     const dec = b64urlDecode(enc);
     assert.deepEqual(Array.from(dec), Array.from(s));
   }
+});
+
+test("passphrase key is deterministic for same passphrase and slug", async () => {
+  const a = await exportKey(await deriveKeyFromPassphrase("correct horse battery", "room-abc", 1000));
+  const b = await exportKey(await deriveKeyFromPassphrase("correct horse battery", "room-abc", 1000));
+  assert.equal(a, b);
+  assert.equal(b64urlDecode(a).length, 32);
+});
+
+test("passphrase key differs by slug and by passphrase", async () => {
+  const base = await exportKey(await deriveKeyFromPassphrase("correct horse battery", "room-abc", 1000));
+  const otherSlug = await exportKey(await deriveKeyFromPassphrase("correct horse battery", "room-xyz", 1000));
+  const otherPass = await exportKey(await deriveKeyFromPassphrase("correct horse batterz", "room-abc", 1000));
+  assert.notEqual(base, otherSlug);
+  assert.notEqual(base, otherPass);
+});
+
+test("passphrase is NFC-normalised", async () => {
+  const composed = await exportKey(await deriveKeyFromPassphrase("caff\u00e8-lungo-1", "s", 1000));
+  const decomposed = await exportKey(await deriveKeyFromPassphrase("caffe\u0300-lungo-1", "s", 1000));
+  assert.equal(composed, decomposed);
+});
+
+test("passphrase key roundtrips and wrong passphrase fails GCM auth", async () => {
+  const k = await deriveKeyFromPassphrase("correct horse battery", "room-abc", 1000);
+  const ct = await encryptText(k, "segreto");
+  assert.equal(await decryptText(k, ct), "segreto");
+  const bad = await deriveKeyFromPassphrase("wrong horse battery", "room-abc", 1000);
+  await assert.rejects(() => decryptText(bad, ct));
+});
+
+test("derived key is interchangeable with importKey of its export", async () => {
+  const k = await deriveKeyFromPassphrase("correct horse battery", "room-abc", 1000);
+  const ct = await encryptText(k, "x");
+  const k2 = await importKey(await exportKey(k));
+  assert.equal(await decryptText(k2, ct), "x");
+});
+
+test("default KDF cost is at least 600k iterations", () => {
+  assert.ok(KDF_ITERATIONS >= 600000);
 });

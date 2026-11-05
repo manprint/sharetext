@@ -18,4 +18,5 @@ ENV PORT=8080 DB_PATH=/data/sharetext.db SLUG_LEN=16
 VOLUME ["/data"]
 EXPOSE 8080
 USER nonroot:nonroot
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/sharetext", "healthcheck"]
 ENTRYPOINT ["/app/sharetext"]

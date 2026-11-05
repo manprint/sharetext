@@ -84,3 +84,16 @@ test('loadPinnedSession tolerates malformed storage payloads', () => {
   storage.setItem(pinStorageKey('tmpfab-abc123'), '{bad json');
   assert.equal(loadPinnedSession(storage, 'tmpfab-abc123'), null);
 });
+test('passphrase flow: key saved without fragment is restored by loadPinnedSession', () => {
+  const storage = makeStorage();
+  savePinnedSession(storage, 'room-abc', 'AbC_123-xyz');
+  const entry = loadPinnedSession(storage, 'room-abc');
+  assert.equal(entry.key, 'AbC_123-xyz');
+});
+
+test('a null re-save does not clear a stored key via rememberPinnedSession', () => {
+  const storage = makeStorage();
+  savePinnedSession(storage, 'room-abc', 'AbC_123-xyz');
+  rememberPinnedSession(storage, 'room-abc', null);
+  assert.equal(loadPinnedSession(storage, 'room-abc').key, 'AbC_123-xyz');
+});

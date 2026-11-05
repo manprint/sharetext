@@ -49,7 +49,13 @@ type pageData struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(runHealthcheck(os.Getenv("PORT")))
+	}
 	cfg := loadConfigFromEnv(os.Getenv)
+	if cfg.AdminPass == "changeme" {
+		log.Printf("WARNING: ADMIN_PASS is the default 'changeme'; set a strong ADMIN_PASS_HASH")
+	}
 	if cfg.AdminPassHash != "" {
 		// Fail fast if ADMIN_PASS_HASH is not a valid bcrypt encoding (typo,
 		// truncated copy/paste, wrong algorithm). Without this every login
@@ -83,6 +89,8 @@ func main() {
 		MaxContentSize:       cfg.MaxContentSize,
 		MaxFileSize:          cfg.MaxFileSize,
 		WSReadTimeout:        cfg.WSReadTimeout,
+		MaxTotalStorageBytes: cfg.MaxTotalStorageBytes,
+		UploadConcurrency:    cfg.UploadConcurrency,
 	}
 	api.AttachLockEvents()
 
@@ -160,7 +168,15 @@ func main() {
 	})
 	requestTimeout := middleware.Timeout(cfg.RequestTimeout)
 
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	r.Get("/healthz", func(w http.ResponseWriter, req *http.Request) {
+		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+		defer cancel()
+		if err := st.Ping(ctx); err != nil {
+			http.Error(w, "db unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte("ok"))
+	})
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
 	// Service worker must be served from root so its default scope covers '/'.
@@ -238,6 +254,8 @@ func main() {
 		User:     cfg.AdminUser,
 		Pass:     cfg.AdminPass,
 		PassHash: cfg.AdminPassHash,
+		MaxFails: cfg.AdminAuthMaxFails,
+		Lockout:  cfg.AdminAuthLockout,
 		Realm:    "sharetext-admin",
 	})
 	r.Group(func(g chi.Router) {
@@ -267,7 +285,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go runCleanup(ctx, st, cfg.CleanupInterval, metrics)
+	go runCleanup(ctx, st, cfg.CleanupInterval, cfg.PersistentIdleTTL, metrics)
 	if cfg.VacuumInterval > 0 {
 		go runVacuum(ctx, st, cfg.VacuumInterval, metrics)
 	}
@@ -301,7 +319,7 @@ func main() {
 // need to look on every cleanup tick.
 const fsSweepEvery = 10 * time.Minute
 
-func runCleanup(ctx context.Context, st *store.Store, every time.Duration, metrics *telemetry.Metrics) {
+func runCleanup(ctx context.Context, st *store.Store, every, idleTTL time.Duration, metrics *telemetry.Metrics) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	var lastFSSweep time.Time
@@ -333,6 +351,14 @@ func runCleanup(ctx context.Context, st *store.Store, every time.Duration, metri
 		} else if n > 0 {
 			deletedSessions = n
 			log.Printf("cleanup: deleted %d expired session(s)", n)
+		}
+		if idleTTL > 0 {
+			if n, err := st.DeleteIdlePersistent(cctx, time.Now().Add(-idleTTL)); err != nil {
+				log.Printf("cleanup idle persistent: %v", err)
+			} else if n > 0 {
+				deletedSessions += n
+				log.Printf("cleanup: deleted %d idle persistent session(s)", n)
+			}
 		}
 		if n, err := st.DeleteOrphanFiles(cctx); err != nil {
 			log.Printf("cleanup files: %v", err)

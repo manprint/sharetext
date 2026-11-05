@@ -16,6 +16,8 @@ import {
 import { shouldApplyRemoteContent, shouldFlushPendingLocalChanges } from './sync.js';
 import {
   importKey,
+  exportKey,
+  deriveKeyFromPassphrase,
   encryptText,
   decryptText,
   encryptBytes,
@@ -52,7 +54,7 @@ import {
   formatTimestamp,
 } from './commands.js';
 import { initOfflineGuard, setOfflineBanner } from './offline-guard.js';
-import { rememberPinnedSession } from './pinning.js';
+import { rememberPinnedSession, loadPinnedSession, savePinnedSession } from './pinning.js';
 import { createOutbox } from './outbox.js';
 import { createConnection } from './connection.js';
 
@@ -133,6 +135,9 @@ let editorMeasureScheduled = false;
 // content is encrypted but we don't have the key in the URL fragment.
 let cryptoKey = null;
 let sessionMode = 'pending';
+// Last ciphertext seen while locked: the unlock form test-decrypts it to tell
+// a right password from a wrong one.
+let lockedCiphertext = null;
 const $decryptBanner = document.getElementById('decrypt-banner');
 
 function parseKeyFromHash() {
@@ -174,10 +179,11 @@ async function decryptIncoming(content) {
     return decision.plain;
   }
   if (decision.kind === 'locked') {
+    lockedCiphertext = content;
     if (sessionMode !== MODE_LOCKED) {
       sessionMode = MODE_LOCKED;
-      applyModeUI();
     }
+    applyModeUI();
     return null;
   }
   // decrypt-attempt
@@ -220,13 +226,44 @@ const outbox = createOutbox({
 
 function applyModeUI() {
   if (sessionMode === 'locked') {
-    setDecryptBanner('Sessione cifrata: chiave mancante nell’URL. Apri il link completo per leggere.');
+    setDecryptBanner('Sessione cifrata: inserisci la password oppure apri il link completo con la chiave.');
   } else if (sessionMode === 'pending') {
     setDecryptBanner('Decifratura…');
   } else {
     setDecryptBanner('');
   }
+  showUnlockForm(sessionMode === 'locked' && lockedCiphertext != null);
   updateLockUI();
+}
+
+const $unlockForm = document.getElementById('unlock-form');
+const $unlockPass = document.getElementById('unlock-pass');
+const $unlockError = document.getElementById('unlock-error');
+
+function showUnlockForm(show) {
+  if (!$unlockForm) return;
+  const wasHidden = $unlockForm.hidden;
+  $unlockForm.hidden = !show;
+  if (show && wasHidden && $unlockPass) $unlockPass.focus();
+}
+
+if ($unlockForm) {
+  $unlockForm.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    $unlockError.hidden = true;
+    const pass = $unlockPass.value;
+    if (!pass || lockedCiphertext == null) return;
+    try {
+      const key = await deriveKeyFromPassphrase(pass, slug);
+      await decryptText(key, lockedCiphertext);
+      rememberPinnedSession(window.localStorage, slug, await exportKey(key));
+      location.reload();
+    } catch {
+      $unlockError.textContent = 'Password errata.';
+      $unlockError.hidden = false;
+      $unlockPass.select();
+    }
+  });
 }
 
 function isLockedForEditing() {
@@ -1476,6 +1513,14 @@ async function loadFileMeta() {
       cryptoKey = null;
     }
     if (cryptoKey) pinKey = keyB64;
+  } else {
+    // No fragment: fall back to a key remembered on this device (password
+    // sessions, or a link already opened here).
+    const pinned = loadPinnedSession(window.localStorage, slug);
+    if (pinned && pinned.key) {
+      try { cryptoKey = await importKey(pinned.key); pinKey = pinned.key; }
+      catch { cryptoKey = null; }
+    }
   }
   rememberPinnedSession(window.localStorage, slug, pinKey);
 
@@ -1490,6 +1535,17 @@ async function loadFileMeta() {
     snapshot = await r.json();
   } catch (err) {
     console.error('initial fetch failed', err);
+  }
+
+  if (snapshot && cryptoKey && !keyB64 && isCiphertext(snapshot.content)) {
+    // A remembered key that no longer opens the session (changed password,
+    // recreated slug) must not stay pinned: fall back to the unlock form.
+    try { await decryptText(cryptoKey, snapshot.content); }
+    catch {
+      cryptoKey = null;
+      pinKey = null;
+      savePinnedSession(window.localStorage, slug, null);
+    }
   }
 
   if (snapshot) {

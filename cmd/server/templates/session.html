@@ -13,6 +13,12 @@
 <body data-slug="{{.Slug}}" data-idle-release="{{.IdleReleaseMs}}">
   <div id="offline-banner" class="offline-banner" hidden>Offline — sola lettura</div>
   <div id="decrypt-banner" class="decrypt-banner" hidden></div>
+  <form id="unlock-form" class="unlock-form" hidden>
+    <label for="unlock-pass">Password</label>
+    <input id="unlock-pass" type="password" autocomplete="current-password">
+    <button type="submit" class="primary">Sblocca</button>
+    <span id="unlock-error" class="unlock-error" role="alert" hidden></span>
+  </form>
   <header class="bar">
     <a href="/" class="brand">sharetext <span class="app-version">{{version}}</span></a>
     <div class="meta">

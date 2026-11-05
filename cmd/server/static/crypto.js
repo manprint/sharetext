@@ -60,6 +60,26 @@ export async function importKey(b64urlRaw) {
   return subtle.importKey("raw", raw, { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
 }
 
+// Passphrase-protected sessions: the AES key is derived, not random, so the
+// URL needs no fragment. The salt is public (slug-bound), so a DB dump allows
+// offline guessing: the passphrase must be strong.
+export const KDF_ITERATIONS = 600000;
+export const MIN_PASSPHRASE_LENGTH = 8;
+const KDF_SALT_PREFIX = "sharetext:pass:v1:";
+
+export async function deriveKeyFromPassphrase(passphrase, slug, iterations = KDF_ITERATIONS) {
+  const pw = new TextEncoder().encode(String(passphrase).normalize("NFC"));
+  const salt = new TextEncoder().encode(KDF_SALT_PREFIX + slug);
+  const base = await subtle.importKey("raw", pw, "PBKDF2", false, ["deriveKey"]);
+  return subtle.deriveKey(
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations },
+    base,
+    { name: "AES-GCM", length: 256 },
+    true,
+    ["encrypt", "decrypt"],
+  );
+}
+
 export async function encryptText(key, plaintext) {
   const iv = getRandomValues(new Uint8Array(IV_BYTES));
   const buf = new TextEncoder().encode(plaintext);

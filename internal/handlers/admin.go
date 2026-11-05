@@ -23,6 +23,10 @@ type BasicAuthConfig struct {
 	Pass     string
 	PassHash string
 	Realm    string
+	// MaxFails failed attempts from one client IP trigger a Lockout (429).
+	// Zero MaxFails disables the lockout.
+	MaxFails int
+	Lockout  time.Duration
 }
 
 // BasicAuth returns middleware that protects routes with HTTP Basic auth.
@@ -40,11 +44,18 @@ func BasicAuth(cfg BasicAuthConfig) func(http.Handler) http.Handler {
 			})
 		}
 	}
+	lk := newAuthLockout(cfg.MaxFails, cfg.Lockout)
 	expU := []byte(cfg.User)
 	expP := []byte(cfg.Pass)
 	hash := []byte(cfg.PassHash)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := clientIP(r)
+			if retry := lk.blocked(ip); retry > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+				http.Error(w, "too many failed attempts", http.StatusTooManyRequests)
+				return
+			}
 			u, p, ok := r.BasicAuth()
 			uOK := ok && subtle.ConstantTimeCompare([]byte(u), expU) == 1
 			pOK := false
@@ -56,10 +67,14 @@ func BasicAuth(cfg BasicAuthConfig) func(http.Handler) http.Handler {
 				}
 			}
 			if !uOK || !pOK {
+				if ok {
+					lk.fail(ip)
+				}
 				w.Header().Set("WWW-Authenticate", `Basic realm="`+cfg.Realm+`", charset="UTF-8"`)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
+			lk.reset(ip)
 			next.ServeHTTP(w, withAdminUser(r, u))
 		})
 	}

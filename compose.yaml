@@ -22,6 +22,8 @@ services:
       MAX_CONTENT_SIZE: "${MAX_CONTENT_SIZE:-6291456}"
       MAX_FILES_PER_SESSION: "${MAX_FILES_PER_SESSION:-256}"
       MAX_SESSION_STORAGE_BYTES: "${MAX_SESSION_STORAGE_BYTES:-104857600}"
+      MAX_TOTAL_STORAGE_BYTES: "${MAX_TOTAL_STORAGE_BYTES:-5368709120}"
+      PERSISTENT_IDLE_TTL: "${PERSISTENT_IDLE_TTL:-2160h}"
       FILE_STORAGE_BACKEND: "${FILE_STORAGE_BACKEND:-db}"
       FILE_STORAGE_DIR: "${FILE_STORAGE_DIR:-/data/sharetext-files}"
       SECURE_DELETE: "${SECURE_DELETE:-true}"
@@ -58,6 +60,14 @@ services:
     volumes:
       - sharetext-data:/data
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
 
 volumes:
   sharetext-data:

@@ -23,6 +23,11 @@ type appConfig struct {
 	MaxContentSize          int64
 	MaxFilesPerSession      int
 	MaxSessionStorageBytes  int64
+	MaxTotalStorageBytes    int64
+	PersistentIdleTTL       time.Duration
+	UploadConcurrency       int
+	AdminAuthMaxFails       int
+	AdminAuthLockout        time.Duration
 	FileStorageBackend      string
 	FileStorageDir          string
 	AdminUser               string
@@ -76,6 +81,11 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		MaxContentSize:          positiveInt64Env(getenv, "MAX_CONTENT_SIZE", handlers.DefaultMaxContentSize),
 		MaxFilesPerSession:      intEnv(getenv, "MAX_FILES_PER_SESSION", 256),
 		MaxSessionStorageBytes:  int64Env(getenv, "MAX_SESSION_STORAGE_BYTES", 100*1024*1024),
+		MaxTotalStorageBytes:    int64Env(getenv, "MAX_TOTAL_STORAGE_BYTES", 5*1024*1024*1024),
+		PersistentIdleTTL:       durationEnv(getenv, "PERSISTENT_IDLE_TTL", 90*24*time.Hour, 0),
+		UploadConcurrency:       intEnv(getenv, "UPLOAD_CONCURRENCY", handlers.DefaultUploadConcurrency),
+		AdminAuthMaxFails:       intEnv(getenv, "ADMIN_AUTH_MAX_FAILS", 5),
+		AdminAuthLockout:        durationEnv(getenv, "ADMIN_AUTH_LOCKOUT", 15*time.Minute, time.Second),
 		FileStorageBackend:      envOrWith(getenv, "FILE_STORAGE_BACKEND", store.FileBackendDB),
 		FileStorageDir:          strings.TrimSpace(getenv("FILE_STORAGE_DIR")),
 		AdminUser:               strings.TrimSpace(getenv("ADMIN_USER")),
@@ -101,7 +111,7 @@ func loadConfigFromEnv(getenv func(string) string) appConfig {
 		IdleTimeout:             durationEnv(getenv, "IDLE_TIMEOUT", 2*time.Minute, 2*time.Minute),
 		MaxHeaderBytes:          intEnv(getenv, "MAX_HEADER_BYTES", 1<<20),
 		SecurityHeadersEnabled:  boolEnv(getenv, "SECURITY_HEADERS_ENABLED", true),
-		ContentSecurityPolicy:   envOrWith(getenv, "CONTENT_SECURITY_POLICY", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self'; manifest-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"),
+		ContentSecurityPolicy:   envOrWith(getenv, "CONTENT_SECURITY_POLICY", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"),
 		FrameOptions:            envOrWith(getenv, "FRAME_OPTIONS", "DENY"),
 		ReferrerPolicy:          envOrWith(getenv, "REFERRER_POLICY", "no-referrer"),
 		PermissionsPolicy:       envOrWith(getenv, "PERMISSIONS_POLICY", "camera=(), microphone=(), geolocation=()"),
