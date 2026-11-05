@@ -1,11 +1,15 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"sharetext/internal/store"
 )
 
 func TestDownloadContentType(t *testing.T) {
@@ -95,5 +99,30 @@ func TestUpdateRefusesGrowthWhenServerFull(t *testing.T) {
 	}
 	if w := doJSON(t, r, http.MethodPut, path, map[string]string{"content": "hi"}); w.Code != http.StatusOK {
 		t.Fatalf("shrink: want 200, got %d", w.Code)
+	}
+}
+
+func TestUpdateContentCountsGrowthOnce(t *testing.T) {
+	api, _ := newTestAPI(t)
+	ctx := context.Background()
+	if _, err := api.Store.Create(ctx, store.CreateOpts{Slug: "quota"}); err != nil {
+		t.Fatal(err)
+	}
+	api.MaxTotalStorageBytes = 1 << 20
+	if _, err := api.updateContent(ctx, "quota", "0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	if got := api.limits().added.Load(); got != 10 {
+		t.Fatalf("growth counted %d bytes, want 10", got)
+	}
+	api.MaxTotalStorageBytes = 15
+	if _, err := api.updateContent(ctx, "quota", "0123456789-bigger-than-the-limit"); !errors.Is(err, store.ErrStorageFull) {
+		t.Fatalf("want ErrStorageFull, got %v", err)
+	}
+	if _, err := api.updateContent(ctx, "missing", "x"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if got := api.limits().added.Load(); got != 10 {
+		t.Fatalf("refused updates must not be counted, got %d", got)
 	}
 }

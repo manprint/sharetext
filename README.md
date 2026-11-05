@@ -277,7 +277,7 @@ ADMIN_PASS_HASH=$2a$12$...
 |-----------|---------|---------|-------------------|
 | `PORT` | `8080` | Porta HTTP del servizio. | Cambiala se hai un reverse proxy o piu' servizi sulla stessa macchina. |
 | `DB_PATH` | `sharetext.db` | Percorso del file SQLite. | Deve stare su storage persistente se vuoi mantenere i dati. |
-| `SLUG_LEN` | `16` | Lunghezza della parte random dello slug. | Valori piu' alti rendono gli URL piu' lunghi ma piu' difficili da indovinare. |
+| `SLUG_LEN` | `16` | Lunghezza della parte random dello slug (min 12, max 64: valori fuori range vengono riportati nei limiti con un warning). | Valori piu' alti rendono gli URL piu' lunghi ma piu' difficili da indovinare. |
 | `CLEANUP_INTERVAL` | `30s` | Frequenza del cleanup delle sessioni scadute e del safety-net file. | Più basso = scadenze applicate prima; più alto = meno sweep ma cleanup meno tempestivo. |
 | `REQUEST_TIMEOUT` | `30s` | Timeout middleware per le richieste HTTP normali. | Se troppo basso puo' troncare richieste lente dietro proxy o storage lento. |
 | `VACUUM_INTERVAL` | `0s` | Frequenza di `VACUUM` + checkpoint WAL. `0` = disabilitato. | Utile per recuperare spazio disco; durante il vacuum le scritture restano bloccate per la durata dell'operazione. |
@@ -641,7 +641,7 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 |-----------|---------|-------------|
 | `PORT` | `8080` | Porta HTTP |
 | `DB_PATH` | `sharetext.db` | File SQLite |
-| `SLUG_LEN` | `16` | Lunghezza della parte random dello slug |
+| `SLUG_LEN` | `16` | Lunghezza della parte random dello slug (12-64) |
 | `CLEANUP_INTERVAL` | `30s` | Frequenza sweep cancellazione sessioni scadute + allegati orfani |
 | `REQUEST_TIMEOUT` | `30s` | Timeout middleware per le richieste HTTP |
 | `VACUUM_INTERVAL` | `0s` (off) | Frequenza `VACUUM` SQLite + `wal_checkpoint(TRUNCATE)` per reclaim spazio. `0` o vuoto = disabilitato. |

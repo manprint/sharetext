@@ -233,7 +233,7 @@ func (a *API) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		defer a.Locks.announce(slug)
 	}
 
-	sess, err := a.Store.UpdateWithin(r.Context(), slug, body.Content, a.growthAllowed(r.Context()))
+	sess, err := a.updateContent(r.Context(), slug, body.Content)
 	if err != nil {
 		writeStoreErr(w, err)
 		return

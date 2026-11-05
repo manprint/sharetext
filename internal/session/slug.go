@@ -14,6 +14,29 @@ const (
 	NameMaxLen = 32
 )
 
+// The random part of a slug is the only secret guarding a plaintext session,
+// so its length is kept within bounds whatever SLUG_LEN says: 12 characters of
+// this alphabet are ~70 bits, enough to make guessing impractical.
+const (
+	DefaultRandomLen = 16
+	MinRandomLen     = 12
+	MaxRandomLen     = 64
+)
+
+// ClampRandomLen maps a configured slug length onto the allowed range; zero or
+// negative means the default.
+func ClampRandomLen(n int) int {
+	switch {
+	case n <= 0:
+		return DefaultRandomLen
+	case n < MinRandomLen:
+		return MinRandomLen
+	case n > MaxRandomLen:
+		return MaxRandomLen
+	}
+	return n
+}
+
 var (
 	nameRe         = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	ErrInvalidName = errors.New("invalid name")
@@ -47,7 +70,7 @@ func ValidName(name string) bool {
 // Compose builds a slug of the form "{name}-{random}" for named persistent
 // sessions, or just "{random}" when name is empty.
 func Compose(name string, randomLen int) (string, error) {
-	rnd, err := NewSlug(randomLen)
+	rnd, err := NewSlug(ClampRandomLen(randomLen))
 	if err != nil {
 		return "", err
 	}

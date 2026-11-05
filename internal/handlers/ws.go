@@ -121,9 +121,14 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 			case <-ctx.Done():
 				return
 			case <-sub.Done():
-				// Dropped by the hub (fell behind, or the session is gone):
-				// close so the client reconnects from a fresh snapshot.
-				_ = c.Close(websocket.StatusTryAgainLater, "resync")
+				// Dropped by the hub (fell behind, the session is gone, or the
+				// server is stopping): close so the client reconnects from a
+				// fresh snapshot.
+				if a.Hub.Closing() {
+					_ = c.Close(websocket.StatusGoingAway, "server shutting down")
+				} else {
+					_ = c.Close(websocket.StatusTryAgainLater, "resync")
+				}
 				cancel()
 				return
 			case msg, ok := <-sub.C:
@@ -202,7 +207,7 @@ func (a *API) WS(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			sess, err := a.Store.UpdateWithin(ctx, slug, m.Content, a.growthAllowed(ctx))
+			sess, err := a.updateContent(ctx, slug, m.Content)
 			if err != nil {
 				if a.Locks != nil {
 					a.Locks.announce(slug)

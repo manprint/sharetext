@@ -113,3 +113,22 @@ func TestComposeInvalidName(t *testing.T) {
 		t.Fatalf("want ErrInvalidName, got %v", err)
 	}
 }
+
+func TestComposeClampsRandomLen(t *testing.T) {
+	for in, want := range map[int]int{0: DefaultRandomLen, -3: DefaultRandomLen, 1: MinRandomLen, 11: MinRandomLen, 12: 12, 20: 20, 500: MaxRandomLen} {
+		s, err := Compose("", in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(s) != want {
+			t.Errorf("SlugLen %d: got len %d want %d", in, len(s), want)
+		}
+	}
+	s, err := Compose("notes", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s) != len("notes-")+MinRandomLen {
+		t.Fatalf("named slug %q: random part not clamped", s)
+	}
+}

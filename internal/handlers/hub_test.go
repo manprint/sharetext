@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -101,5 +102,40 @@ func TestHubKickRoom(t *testing.T) {
 	case <-other.Done():
 		t.Fatal("Kick must not touch other rooms")
 	default:
+	}
+}
+
+func TestHubShutdownDropsAndWaits(t *testing.T) {
+	h := NewHub()
+	a := h.Join("r")
+	go func() {
+		<-a.Done()
+		h.Leave("r", a)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := h.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if !h.Closing() || h.ActiveConnections() != 0 {
+		t.Fatal("hub must be closing and empty")
+	}
+	late := h.Join("r")
+	defer h.Leave("r", late)
+	select {
+	case <-late.Done():
+	default:
+		t.Fatal("a subscriber joining during shutdown must be dropped at once")
+	}
+}
+
+func TestHubShutdownGivesUpAtDeadline(t *testing.T) {
+	h := NewHub()
+	stuck := h.Join("r")
+	defer h.Leave("r", stuck)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := h.Shutdown(ctx); err == nil {
+		t.Fatal("want deadline error while a subscriber never leaves")
 	}
 }

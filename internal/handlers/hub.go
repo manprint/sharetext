@@ -1,6 +1,10 @@
 package handlers
 
-import "sync"
+import (
+	"context"
+	"sync"
+	"time"
+)
 
 // subscriberBuffer is how many undelivered messages a WebSocket peer may
 // accumulate before the hub gives up on it.
@@ -35,8 +39,9 @@ func (s *Subscriber) send(msg []byte) {
 }
 
 type Hub struct {
-	mu    sync.RWMutex
-	rooms map[string]map[*Subscriber]struct{}
+	mu      sync.RWMutex
+	rooms   map[string]map[*Subscriber]struct{}
+	closing bool
 }
 
 func NewHub() *Hub {
@@ -51,6 +56,9 @@ func (h *Hub) Join(slug string) *Subscriber {
 		h.rooms[slug] = make(map[*Subscriber]struct{})
 	}
 	h.rooms[slug][sub] = struct{}{}
+	if h.closing {
+		sub.kick()
+	}
 	return sub
 }
 
@@ -84,6 +92,38 @@ func (h *Hub) Kick(slug string) {
 	for sub := range h.rooms[slug] {
 		sub.kick()
 	}
+}
+
+// Closing reports whether Shutdown was called.
+func (h *Hub) Closing() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.closing
+}
+
+// Shutdown drops every subscriber, and any that joins later, then waits until
+// all have left (their handlers released locks and closed their connections)
+// or ctx ends. http.Server.Shutdown neither closes nor waits for hijacked
+// WebSocket connections, so the server calls this alongside it.
+func (h *Hub) Shutdown(ctx context.Context) error {
+	h.mu.Lock()
+	h.closing = true
+	for _, room := range h.rooms {
+		for sub := range room {
+			sub.kick()
+		}
+	}
+	h.mu.Unlock()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for h.ActiveConnections() > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+	return nil
 }
 
 func (h *Hub) ActiveRooms() int {

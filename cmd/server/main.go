@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"sync"
 	"syscall"
 	texttemplate "text/template"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"sharetext/internal/handlers"
+	"sharetext/internal/session"
 	"sharetext/internal/store"
 	"sharetext/internal/telemetry"
 	"sharetext/internal/version"
@@ -48,11 +50,30 @@ type pageData struct {
 	ManifestPath  string
 }
 
+// existingSlug returns the {slug} route parameter, or answers 404 (500 on a
+// store error) and false when no live session has that slug.
+func existingSlug(st *store.Store, w http.ResponseWriter, r *http.Request) (string, bool) {
+	slug := chi.URLParam(r, "slug")
+	ok, err := st.Exists(r.Context(), slug)
+	if err != nil {
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return "", false
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return "", false
+	}
+	return slug, true
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		os.Exit(runHealthcheck(os.Getenv("PORT")))
 	}
 	cfg := loadConfigFromEnv(os.Getenv)
+	if n := session.ClampRandomLen(cfg.SlugLen); n != cfg.SlugLen && cfg.SlugLen != 0 {
+		log.Printf("WARNING: SLUG_LEN=%d out of range [%d,%d], using %d", cfg.SlugLen, session.MinRandomLen, session.MaxRandomLen, n)
+	}
 	if cfg.AdminPass == "changeme" {
 		log.Printf("WARNING: ADMIN_PASS is the default 'changeme'; set a strong ADMIN_PASS_HASH")
 	}
@@ -195,14 +216,8 @@ func main() {
 	r.Group(func(g chi.Router) {
 		g.Use(publicRateLimit)
 		g.Get("/manifest/session/{slug}.webmanifest", func(w http.ResponseWriter, r *http.Request) {
-			slug := chi.URLParam(r, "slug")
-			ok, err := st.Exists(r.Context(), slug)
-			if err != nil {
-				http.Error(w, "internal", http.StatusInternalServerError)
-				return
-			}
+			slug, ok := existingSlug(st, w, r)
 			if !ok {
-				http.NotFound(w, r)
 				return
 			}
 			w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
@@ -217,20 +232,17 @@ func main() {
 			}
 		})
 		g.With(requestTimeout).Get("/launch/{slug}", func(w http.ResponseWriter, r *http.Request) {
-			slug := chi.URLParam(r, "slug")
+			slug, ok := existingSlug(st, w, r)
+			if !ok {
+				return
+			}
 			if err := tpl.ExecuteTemplate(w, "launcher.html", pageData{Slug: slug, ManifestPath: sessionManifestPath(slug)}); err != nil {
 				log.Printf("render launcher: %v", err)
 			}
 		})
 		g.With(requestTimeout).Get("/s/{slug}", func(w http.ResponseWriter, r *http.Request) {
-			slug := chi.URLParam(r, "slug")
-			ok, err := st.Exists(r.Context(), slug)
-			if err != nil {
-				http.Error(w, "internal", http.StatusInternalServerError)
-				return
-			}
+			slug, ok := existingSlug(st, w, r)
 			if !ok {
-				http.NotFound(w, r)
 				return
 			}
 			if err := tpl.ExecuteTemplate(w, "session.html", pageData{Slug: slug, IdleReleaseMs: cfg.LockIdleRelease.Milliseconds(), ManifestPath: sessionManifestPath(slug)}); err != nil {
@@ -309,9 +321,16 @@ func main() {
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	var wsDone sync.WaitGroup
+	wsDone.Go(func() {
+		if err := api.Hub.Shutdown(shutCtx); err != nil {
+			log.Printf("websocket shutdown: %v", err)
+		}
+	})
 	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+	wsDone.Wait()
 }
 
 // fsSweepEvery spaces out SweepFSOrphans, which lists the whole attachment

@@ -775,3 +775,38 @@ func TestWSEditRejectedWhenServerFull(t *testing.T) {
 		t.Fatalf("content must stay unchanged: %q %v", sess.Content, err)
 	}
 }
+
+func TestWSClosedOnShutdown(t *testing.T) {
+	srv, api := newWSServer(t)
+	if _, err := api.Store.Create(context.Background(), store.CreateOpts{Slug: "bye"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(srv.URL, "bye"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	readJSON(t, ctx, c)
+	if err := c.Write(ctx, websocket.MessageText, []byte(`{"type":"lock_acquire"}`)); err != nil {
+		t.Fatal(err)
+	}
+	readUntil(t, ctx, c, "lock")
+	done := make(chan error, 1)
+	go func() { done <- api.Hub.Shutdown(ctx) }()
+	for {
+		if _, _, err := c.Read(ctx); err != nil {
+			if got := websocket.CloseStatus(err); got != websocket.StatusGoingAway {
+				t.Fatalf("want close 1001, got %v (%v)", got, err)
+			}
+			break
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("shutdown must wait for the handler to leave: %v", err)
+	}
+	if snap := api.Locks.State("bye"); snap.Held {
+		t.Fatal("lock must be released on shutdown")
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"sharetext/internal/store"
 )
 
 // DefaultUploadConcurrency caps simultaneous uploads (each buffers up to
@@ -64,19 +66,26 @@ func (a *API) storageFull(ctx context.Context, extra int64) bool {
 	return cur+extra > a.MaxTotalStorageBytes
 }
 
-// growthAllowed returns the Store.UpdateWithin hook enforcing the server-wide
-// storage limit on content that grows; nil when no limit is configured.
-func (a *API) growthAllowed(ctx context.Context) func(int64) bool {
-	if a.MaxTotalStorageBytes <= 0 || a.Store == nil {
-		return nil
+// updateContent saves content under the server-wide storage limit. Approved
+// growth is counted only after the update committed: the store runs the hook
+// again when it retries a busy transaction, and may still fail after it.
+func (a *API) updateContent(ctx context.Context, slug, content string) (*store.Session, error) {
+	if a.MaxTotalStorageBytes <= 0 {
+		return a.Store.Update(ctx, slug, content)
 	}
-	return func(delta int64) bool {
+	var grew int64
+	sess, err := a.Store.UpdateWithin(ctx, slug, content, func(delta int64) bool {
+		grew = 0
 		if a.storageFull(ctx, delta) {
 			return false
 		}
-		a.noteStored(delta)
+		grew = delta
 		return true
+	})
+	if err == nil {
+		a.noteStored(grew)
 	}
+	return sess, err
 }
 
 func (a *API) noteStored(n int64) {
