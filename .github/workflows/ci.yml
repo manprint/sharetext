@@ -21,7 +21,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '26'
 
       - name: gofmt
         run: |
@@ -40,3 +40,27 @@ jobs:
 
       - name: JS tests
         run: node --test cmd/server/static/*.test.mjs
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright-core install --with-deps --only-shell chromium
+
+      - name: Browser end-to-end tests
+        run: e2e/run.sh
