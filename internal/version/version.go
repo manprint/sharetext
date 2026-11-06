@@ -3,7 +3,7 @@
 // The default value is the in-source version. Release builds should override
 // it at link time:
 //
-//	go build -ldflags "-X sharetext/internal/version.Version=v1.3.2" ./cmd/server
+//	go build -ldflags "-X sharetext/internal/version.Version=v1.4.0" ./cmd/server
 //
 // A GitHub Actions workflow can pass the tag verbatim:
 //
@@ -11,4 +11,4 @@
 package version
 
 // Version is the current application version. Overridable via -ldflags -X.
-var Version = "v1.3.2"
+var Version = "v1.4.0"
