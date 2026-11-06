@@ -55,11 +55,25 @@ import {
   formatTimestamp,
 } from './commands.js';
 import { initOfflineGuard, setOfflineBanner } from './offline-guard.js';
-import { rememberPinnedSession, loadPinnedSession, savePinnedSession, safeLocalStorage } from './pinning.js';
+import {
+  rememberPinnedSession,
+  loadPinnedSession,
+  savePinnedSession,
+  safeLocalStorage,
+  buildPinnedManifestPath,
+  KEY_FROM_LINK,
+  KEY_FROM_PASSWORD,
+} from './pinning.js';
+import { parseSessionLocation, sessionPath } from './share-link.js';
 import { createOutbox } from './outbox.js';
 import { createConnection } from './connection.js';
 
-const slug = document.body.dataset.slug;
+// The session address: the share link fragment (/s/#!…) or, for /s/<slug>
+// links, the slug the server rendered. See share-link.js.
+const sessionLink = parseSessionLocation({ hash: location.hash, pathSlug: document.body.dataset.slug || '' });
+const slug = sessionLink.slug || '';
+// Tells shell-guard.js that the current code is running.
+window.__sharetextApp = true;
 const $content = document.getElementById('content');
 const $lineNumbers = document.getElementById('line-numbers');
 const $editorMeasure = document.getElementById('editor-measure');
@@ -141,11 +155,32 @@ let sessionMode = 'pending';
 let lockedCiphertext = null;
 const $decryptBanner = document.getElementById('decrypt-banner');
 
-function parseKeyFromHash() {
-  const h = location.hash || '';
-  const m = h.match(/(?:^#|&)k=([A-Za-z0-9_-]+)/);
-  return m ? m[1] : null;
+// showAddress keeps the address bar on the canonical link, so "Copia link"
+// and bookmarks always get a complete one. keyB64 must be a key that may
+// travel in a link (never a password-derived one).
+function showAddress(keyB64) {
+  const path = sessionPath(slug, keyB64);
+  if (location.pathname + location.hash !== path) history.replaceState(null, '', path);
 }
+
+if (slug) {
+  if (sessionLink.keyB64) showAddress(sessionLink.keyB64);
+  document.title = `sharetext · ${slug}`;
+  if (!document.querySelector('link[rel="manifest"]')) {
+    const manifest = document.createElement('link');
+    manifest.rel = 'manifest';
+    manifest.href = buildPinnedManifestPath(slug);
+    document.head.appendChild(manifest);
+  }
+}
+
+// Every share link opens on /s/, so following another one in this tab only
+// changes the fragment: load that session.
+window.addEventListener('hashchange', () => {
+  const pathSlug = location.pathname.startsWith('/s/') ? decodeURIComponent(location.pathname.slice(3)) : '';
+  const next = parseSessionLocation({ hash: location.hash, pathSlug });
+  if (next.slug !== sessionLink.slug || next.keyB64 !== sessionLink.keyB64) location.reload();
+});
 
 function setDecryptBanner(text) {
   if (!$decryptBanner) return;
@@ -177,8 +212,11 @@ async function settleKey(content) {
     // Content that is not ciphertext cannot vouch for a key: use it for this
     // page, but never let it replace a key already remembered here.
     if (isCiphertext(content) || !candidates.some((c) => c.pinned)) {
-      rememberPinnedSession(storage, slug, winner.b64);
+      rememberPinnedSession(storage, slug, winner.b64, winner.pinned ? winner.source : KEY_FROM_LINK);
     }
+    // A remembered key replaced the link's: show the link that works, or
+    // the bare address when that key must not travel in a link.
+    if (winner.pinned) showAddress(winner.source === KEY_FROM_LINK ? winner.b64 : null);
   } else if (isCiphertext(content) && candidates.some((c) => c.pinned)) {
     savePinnedSession(storage, slug, null);
   }
@@ -307,9 +345,9 @@ if ($unlockForm) {
     try {
       const key = await deriveKeyFromPassphrase(pass, slug);
       await decryptText(key, lockedCiphertext);
-      rememberPinnedSession(safeLocalStorage(), slug, await exportKey(key));
-      // A wrong #k= in the URL would otherwise be tried again after reload.
-      history.replaceState(null, '', location.pathname + location.search);
+      rememberPinnedSession(safeLocalStorage(), slug, await exportKey(key), KEY_FROM_PASSWORD);
+      // A wrong key in the URL would otherwise be tried again after reload.
+      history.replaceState(null, '', sessionPath(slug));
       location.reload();
     } catch {
       $unlockError.textContent = 'Password errata.';
@@ -841,6 +879,22 @@ function handleExpired() {
     $countdown.classList.add('expired');
   }
   if ($overlay) $overlay.hidden = false;
+}
+
+// handleBadLink is the terminal state of a share page whose link lost its
+// address on the way (truncated, altered, or stripped of the fragment).
+function handleBadLink(kind) {
+  const $title = $overlay && $overlay.querySelector('h2');
+  const $text = $overlay && $overlay.querySelector('p');
+  if ($title) $title.textContent = 'Link incompleto';
+  if ($text) {
+    $text.textContent = kind === 'missing'
+      ? 'Nel link manca la parte dopo "/s/#!". Fatti rimandare il link completo della sessione.'
+      : 'Il link è stato troncato o modificato nel copia e incolla. Fatti rimandare il link completo (pulsante "Copia link").';
+  }
+  setDecryptBanner(null);
+  handleExpired();
+  if ($countdown) $countdown.hidden = true;
 }
 
 function startCountdown(iso) {
@@ -1584,20 +1638,24 @@ async function loadFileMeta() {
 // against a fully-settled `cryptoKey`. Decifratura banner stays up until
 // the snapshot has been applied.
 (async () => {
+  if (sessionLink.error) {
+    handleBadLink(sessionLink.error);
+    return;
+  }
   applyModeUI(); // show "Decifratura…" while we work
 
   // Candidate keys, best first: the URL fragment, then a key remembered on
   // this device (password sessions, or a link already opened here). None is
   // trusted or remembered until it has opened the session's ciphertext.
   const storage = safeLocalStorage();
-  const keyB64 = parseKeyFromHash();
+  const keyB64 = sessionLink.keyB64;
   if (keyB64) {
-    try { pendingKeys.push({ key: await importKey(keyB64), b64: keyB64, pinned: false }); }
+    try { pendingKeys.push({ key: await importKey(keyB64), b64: keyB64, pinned: false, source: KEY_FROM_LINK }); }
     catch (err) { console.warn('failed to import key from URL fragment', err); }
   }
   const pinned = loadPinnedSession(storage, slug);
   if (pinned && pinned.key && pinned.key !== keyB64) {
-    try { pendingKeys.push({ key: await importKey(pinned.key), b64: pinned.key, pinned: true }); }
+    try { pendingKeys.push({ key: await importKey(pinned.key), b64: pinned.key, pinned: true, source: pinned.source }); }
     catch {}
   }
   rememberPinnedSession(storage, slug, null);

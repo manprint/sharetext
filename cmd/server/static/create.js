@@ -1,10 +1,11 @@
 /* Landing-page form handler. Extracted from an inline <script> so the
  * page-wide CSP can drop `'unsafe-inline'`. Also bootstraps the per-session
- * AES-256-GCM key and tucks it into the URL fragment before redirecting,
+ * AES-256-GCM key and puts it in the share link (see share-link.js) before redirecting,
  * so the resulting session is end-to-end encrypted by default.
  */
 import { generateKey, exportKey, deriveKeyFromPassphrase, encryptText, MIN_PASSPHRASE_LENGTH } from './crypto.js';
-import { savePinnedSession, safeLocalStorage } from './pinning.js';
+import { savePinnedSession, safeLocalStorage, KEY_FROM_PASSWORD } from './pinning.js';
+import { sessionPath } from './share-link.js';
 import { initOfflineGuard, setOfflineBanner } from './offline-guard.js';
 
 const form = document.getElementById('create-form');
@@ -63,12 +64,11 @@ if (form) {
     try {
       // Generate the per-session key BEFORE the network round-trip so a
       // slow Web Crypto call doesn't make the redirect feel laggy.
-      let keyFragment = '';
+      let linkKey = null;
       let key = null;
       if (!passphrase) try {
         key = await generateKey();
-        const raw = await exportKey(key);
-        keyFragment = '#k=' + raw;
+        linkKey = await exportKey(key);
       } catch (cryptoErr) {
         key = null;
         // If Web Crypto is unavailable (very old browser, insecure context),
@@ -97,9 +97,9 @@ if (form) {
           body: JSON.stringify({ content: await encryptText(key, '') }),
         });
         if (!seed.ok) throw new Error('inizializzazione cifratura fallita (' + seed.status + ')');
-        if (passphrase) savePinnedSession(safeLocalStorage(), data.slug, await exportKey(key));
+        if (passphrase) savePinnedSession(safeLocalStorage(), data.slug, await exportKey(key), KEY_FROM_PASSWORD);
       }
-      window.location.href = data.url + keyFragment;
+      window.location.href = linkKey ? sessionPath(data.slug, linkKey) : data.url;
     } catch (e) {
       err.textContent = e.message;
       err.hidden = false;

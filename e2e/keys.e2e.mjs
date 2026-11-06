@@ -6,7 +6,7 @@ import {
 } from './helpers.mjs';
 
 let browser;
-let session; // { slug, key } of a #k= session holding 'top secret'
+let session; // { slug, key } of a link-key session holding 'top secret'
 const wrongKey = randomKey();
 
 before(async () => {
@@ -24,8 +24,8 @@ before(async () => {
 
 after(async () => { await browser?.close(); });
 
-test('#k= sessions are seeded encrypted and edits stored as ciphertext', async () => {
-  assert.ok(session.key, 'creation redirects to a #k= link');
+test('link-key sessions are seeded encrypted and edits stored as ciphertext', async () => {
+  assert.ok(session.key, 'creation redirects to a link with the key');
   assert.equal(await decryptWith(session.key, session.seeded), '', 'seeded with encrypted empty text');
   const content = await apiContent(session.slug);
   assert.match(content, /^enc:v1:/);
@@ -98,6 +98,6 @@ test('password sessions unlock with the password and drop a stale #k=', async ()
   await p2.fill('#unlock-pass', pass);
   await p2.press('#unlock-pass', 'Enter');
   assert.ok(await waitContent(p2, 'pw data'));
-  assert.ok(!p2.url().includes('#k='), p2.url());
+  assert.equal(p2.url(), `${BASE}/s/${slug}`, 'a password key never shows up in the address');
   await c2.close();
 });

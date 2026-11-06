@@ -31,7 +31,7 @@ Ogni sessione puo' contenere:
 - testo libero nell'editor;
 - allegati caricati via upload o drag and drop;
 - righe speciali per copiare/scaricare facilmente singole porzioni di contenuto;
-- cifratura end-to-end opzionale tramite chiave nel fragment `#k=...` dell'URL.
+- cifratura end-to-end opzionale tramite chiave nel fragment dell'URL (`/s/#!...`).
 
 La filosofia del progetto e' semplice:
 
@@ -92,30 +92,42 @@ La filosofia del progetto e' semplice:
 
 ### Cifratura end-to-end
 
-Per le nuove sessioni la chiave viene generata nel browser e appesa all'URL dopo `#`, ad esempio:
+Per le nuove sessioni la chiave viene generata nel browser e l'intero indirizzo della sessione sta nel fragment dell'URL, dopo `#!`:
 
 ```text
-https://host/s/sessione-abc#k=...
+https://host/s/#!<slug><chiave: 44 caratteri><controllo: 3 caratteri>
 ```
 
 La parte dopo `#` non viene inviata al server nelle richieste HTTP.
+
+Formato del link (`share-link.js`):
+
+- dopo lo slug ci sono solo lettere e cifre (alfabeto dello slug, senza i caratteri ambigui `0`, `O`, `1`, `l`): niente `=`, `_`, `-` o punteggiatura che chat, client mail e preferiti tagliano o "correggono";
+- la chiave AES-256 occupa sempre 44 caratteri, seguiti da 3 caratteri di controllo (checksum su slug + chiave);
+- un link troncato o alterato nel copia e incolla mostra "Link incompleto", senza aprire l'editor e senza chiamare il server; il controllo rende trascurabile (circa 1 su 195.000) il rischio di finire su una chiave o una sessione sbagliata, e una chiave sbagliata comunque non decifra;
+- punteggiatura attaccata in coda (`.` `,` `)` `>` ...), spazi, a capo, caratteri invisibili e `#%21` al posto di `#!` sono tollerati;
+- appena la pagina si apre la barra degli indirizzi mostra il link canonico: "Copia link" e i preferiti salvano sempre il link completo e pulito;
+- il server risponde 404 a `?_escaped_fragment_=` (vecchio schema dei crawler per `#!`), cosi' le anteprime dei link non gli inoltrano la chiave.
 
 Conseguenze pratiche:
 
 - il server salva ciphertext e non la chiave;
 - chi possiede il link completo puo' leggere la sessione;
-- se apri la sessione senza `#k=...`, la sessione cifrata entra in modalita' bloccata/sola lettura.
+- se il link perde la parte dopo `#!` la pagina mostra "Link incompleto": serve il link completo;
+- i vecchi link `https://host/s/<slug>#k=...` continuano a funzionare e la barra indirizzi li riscrive nel nuovo formato;
+- i link `#!` non si aprono con versioni precedenti alla v1.4.0.
 
 #### Link pulito con password
 
-Alla creazione puoi impostare una **password** (min. 8 caratteri, da ripetere): il link resta `https://host/s/nome` senza `#k=`.
+Alla creazione puoi impostare una **password** (min. 8 caratteri, da ripetere): il link resta `https://host/s/nome` senza chiave.
 
 - La chiave AES-256 e' derivata nel browser con PBKDF2-SHA256 (600k iterazioni), salt `sharetext:pass:v1:<slug>`; il formato `enc:v1` non cambia.
 - Chi apre il link vede il form "Sblocca"; con password errata la sessione resta in sola lettura.
-- La chiave derivata viene ricordata sul dispositivo (`localStorage`, come per i link `#k=`): la password si inserisce una volta per dispositivo.
+- La chiave derivata viene ricordata sul dispositivo (`localStorage`, come per i link con chiave): la password si inserisce una volta per dispositivo.
 - Alla creazione il creator scrive subito un contenuto cifrato vuoto, cosi' la sessione non e' mai "vuota in chiaro".
 - Il salt e' pubblico: chi ottiene il DB puo' tentare la password offline. Usa password lunghe.
-- Senza password resta il comportamento classico (`#k=` nel link). Un link `#k=` aperto senza fragment su un dispositivo che l'ha gia' visto si sblocca con la chiave ricordata.
+- Senza password resta il comportamento classico (chiave nel link `#!`). Su un dispositivo che ha gia' aperto la sessione anche `https://host/s/nome` si sblocca con la chiave ricordata.
+- Una chiave derivata dalla password non finisce mai nell'URL ne' in "Copia link".
 
 ### Hardening applicativo
 
@@ -393,7 +405,7 @@ ALLOWED_ORIGINS=https://sharetext.example.com,https://app.example.com
 
 ### Regola importante sul link
 
-Se la sessione e' cifrata, devi condividere il link completo, inclusa la parte dopo `#k=`.
+Se la sessione e' cifrata, devi condividere il link completo, inclusa tutta la parte dopo `#!` (usa "Copia link").
 
 Se manca quella parte:
 
@@ -440,11 +452,11 @@ sharetext supporta il pinning di singole sessioni sulla schermata Home.
 - La home dell'app ha un manifest generale.
 - La pagina di una sessione usa invece un manifest dedicato per quello slug.
 - L'icona creata apre un launcher `/launch/{slug}`.
-- Il launcher recupera in locale la chiave della sessione gia' vista su quel dispositivo e reindirizza a `/s/{slug}#k=...`.
+- Il launcher recupera in locale la chiave della sessione gia' vista su quel dispositivo e reindirizza al link `/s/#!...` (sessioni con password: `/s/{slug}`, la chiave resta solo in locale).
 
 ### Procedura consigliata
 
-1. Apri la sessione con il link completo, incluso `#k=...` se presente.
+1. Apri la sessione con il link completo (`/s/#!...`) se presente.
 2. Attendi il caricamento completo della pagina sessione.
 3. Usa la funzione del browser `Aggiungi alla schermata Home`.
 4. Apri l'icona creata per verificare che parta direttamente nella sessione corretta.
@@ -565,7 +577,7 @@ Backend Go single-binary, persistenza SQLite, sync via WebSocket, frontend vanil
 
 **Sicurezza**
 
-- **Cifratura end-to-end** opzionale per ogni nuova sessione: chiave AES-256-GCM generata nel browser, distribuita via fragment URL `#k=…` (mai inviato al server). Vedi [Sicurezza & E2E](#sicurezza--e2e).
+- **Cifratura end-to-end** opzionale per ogni nuova sessione: chiave AES-256-GCM generata nel browser, distribuita via fragment URL `#!…` (mai inviato al server). Vedi [Sicurezza & E2E](#sicurezza--e2e).
 - **WebSocket origin check** configurabile (`ALLOWED_ORIGINS`); default same-origin.
 - **HSTS** abilitato di default quando il proxy segnala HTTPS.
 - **Admin password con hash bcrypt** (`ADMIN_PASS_HASH`), preferito sul plaintext `ADMIN_PASS`.
@@ -611,10 +623,10 @@ Apri `http://localhost:8080`. Crea una sessione **Persistente** (richiede nome) 
 
 ### Cifratura end-to-end (sessioni create dopo l'introduzione di questa feature)
 
-- Dalla landing, ogni nuova sessione genera una chiave AES-256-GCM nel browser del creator. La chiave viene appesa al URL dopo `#` (es. `https://host/s/abc-xyz#k=…`). I browser **non** inviano il fragment al server in nessuna richiesta HTTP, quindi il server vede solo ciphertext.
+- Dalla landing, ogni nuova sessione genera una chiave AES-256-GCM nel browser del creator. La chiave sta nel fragment dell'URL (es. `https://host/s/#!abc-xyz…`, formato in [Cifratura end-to-end](#cifratura-end-to-end)). I browser **non** inviano il fragment al server in nessuna richiesta HTTP, quindi il server vede solo ciphertext.
 - Il contenuto testuale viene serializzato come `enc:v1:<iv-b64url>:<ciphertext-b64url>`. I file vengono cifrati come bytes (IV prepended, payload binario). Il nome file viene cifrato separatamente in formato `<iv>.<ct>` e va a riempire il marker `[file:<id>:<name-cifrato>]`.
-- Quando il fragment `#k=…` e il marker `[file:...]` sono presenti, il client puo' ricostruire localmente il nome dell'allegato anche se il listing metadata `GET /api/sessions/{slug}/files` non e' disponibile in quel momento. Il placeholder `(allegato cifrato)` resta solo come fallback per chiave assente o decifratura fallita.
-- Aprire la sessione **senza** il fragment `#k=…` la mette in modalità "sola lettura cifrata": banner di avviso, editor read-only, niente render del ciphertext grezzo.
+- Quando la chiave e il marker `[file:...]` sono presenti, il client puo' ricostruire localmente il nome dell'allegato anche se il listing metadata `GET /api/sessions/{slug}/files` non e' disponibile in quel momento. Il placeholder `(allegato cifrato)` resta solo come fallback per chiave assente o decifratura fallita.
+- Aprire `https://host/s/<slug>` **senza** chiave (e senza chiave ricordata) la mette in modalità "sola lettura cifrata": banner di avviso, editor read-only, niente render del ciphertext grezzo.
 - Sessioni create **prima** dell'introduzione restano plaintext: nessuna migrazione automatica (impossibile senza chiave). Per cifrare contenuti vecchi: creare una nuova sessione e fare copy/paste manuale.
 - **Threat model**: la cifratura protegge da dump del DB, snapshot del disco VPS, accesso operatore al filesystem o al backup. **Non** protegge se l'operatore può sostituire `app.js` con codice malevolo (limite intrinseco di tutti gli E2E in web app), né da chi riceve il link completo.
 - "Copia link" copia `location.href` incluso il fragment → chi riceve può leggere. Cronologia browser, bookmark sync, screenshot esporrebbero la chiave: trattare il link come dato sensibile.
@@ -1019,7 +1031,7 @@ L'app è una Progressive Web App installabile: manifest, icone, service worker e
 - `static/manifest.webmanifest` con `name`, `short_name`, `theme_color: #0f766e`, `background_color`, `display: standalone` per la landing/root app.
 - Le pagine sessione servono invece un **manifest dinamico per slug** su `/manifest/session/{slug}.webmanifest`: `id` e `start_url` puntano a `/launch/{slug}`, cosi' un "Aggiungi alla schermata Home" fatto dalla sessione pina proprio quella sessione invece della home.
 - Icone `icon-192.png`, `icon-512.png`, `icon-maskable.svg`, `apple-touch-icon` (`icon-180.png`).
-- Il launcher `/launch/{slug}` recupera localmente l'eventuale chiave `#k=...` gia' vista su quel dispositivo e reindirizza a `/s/{slug}#k=...` senza inviarla mai al server.
+- Il launcher `/launch/{slug}` recupera localmente l'eventuale chiave gia' vista su quel dispositivo e reindirizza al link `/s/#!...` senza inviarla mai al server (chiavi da password: `/s/{slug}`).
 
 ### Service worker
 
@@ -1399,7 +1411,9 @@ cmd/server/
     icon-*.png, *.svg      icone PWA (192, 512, maskable, apple-touch)
     favicon.svg            favicon
     app.js                 client sessione: WS, debounce, render, drag-drop, toggle mobile, E2E gating
-    create.js              landing form: genera AES key client-side, appende #k=… al redirect
+    create.js              landing form: genera AES key client-side, redirect al link /s/#!…
+    share-link.js          formato link /s/#!<slug><chiave><controllo>, parsing tollerante
+    shell-guard.js         reload unico se un SW vecchio serve app.js obsoleto su /s/
     crypto.js              wrapper Web Crypto AES-256-GCM (encrypt/decrypt text/bytes/name)
     bundle-client.js       ZIP builder client-side (STORE) per sessioni E2E
     e2e-state.js           state machine pura E2E (modes, classify incoming, guard anti-leak)

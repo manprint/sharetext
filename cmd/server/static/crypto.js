@@ -3,8 +3,8 @@
  * Wire format: `enc:v1:<base64url-iv>:<base64url-ciphertext>` for text.
  *              Raw `[iv(12)|ciphertext+tag]` Uint8Array for binary blobs.
  *
- * Server never sees the key — it lives in the URL fragment (`#k=…`), which
- * the browser refuses to forward in HTTP requests.
+ * Server never sees the key — it lives in the URL fragment (`/s/#!…`, see
+ * share-link.js), which the browser refuses to forward in HTTP requests.
  */
 
 export const ENC_PREFIX = "enc:v1:";

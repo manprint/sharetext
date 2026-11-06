@@ -5,6 +5,7 @@
 //   ADMIN_USER / ADMIN_PASS  admin credentials; admin-only tests skip without them
 import { chromium } from 'playwright-core';
 import { webcrypto as wc } from 'node:crypto';
+import { parseSessionLocation, shareFragment } from '../cmd/server/static/share-link.js';
 
 export const BASE = (process.env.SHARETEXT_URL || 'http://127.0.0.1:8080').replace(/\/$/, '');
 export const ADMIN = process.env.ADMIN_USER && process.env.ADMIN_PASS
@@ -43,8 +44,19 @@ export const editorState = (page) => page.evaluate(() => {
 export const waitEditable = (page) =>
   page.waitForFunction(() => !document.getElementById('content').readOnly, null, { timeout: 10000 });
 
-export const waitContent = (page, text, timeout = 10000) =>
-  page.waitForFunction((t) => document.getElementById('content').value === t, text, { timeout }).then(() => true, () => false);
+// waitContent survives the page reloading itself (unlock, another link).
+export async function waitContent(page, text, timeout = 10000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    try {
+      await page.waitForFunction((t) => document.getElementById('content')?.value === t, text, { timeout: Math.max(1, end - Date.now()) });
+      return true;
+    } catch (err) {
+      if (!/context was destroyed|navigat/i.test(String(err && err.message))) return false;
+    }
+  }
+  return false;
+}
 
 // waitStored polls the server until the session content satisfies pred.
 export async function waitStored(slug, pred, timeout = 10000) {
@@ -57,6 +69,16 @@ export async function waitStored(slug, pred, timeout = 10000) {
   }
 }
 
+// shareLink is the link "Copia link" gives for a session opened with key.
+export const shareLink = (slug, key) => `${BASE}/s/${shareFragment(slug, key)}`;
+
+// readLocation is what the page itself reads from its address.
+export function readLocation(href) {
+  const url = new URL(href);
+  const pathSlug = url.pathname.startsWith('/s/') ? decodeURIComponent(url.pathname.slice(3)) : '';
+  return parseSessionLocation({ hash: url.hash, pathSlug });
+}
+
 // createSession goes through the landing page form, like a user would.
 export async function createSession(page, { name, passphrase } = {}) {
   await page.goto(`${BASE}/`);
@@ -67,9 +89,8 @@ export async function createSession(page, { name, passphrase } = {}) {
   }
   await page.click('#create-btn');
   await page.waitForURL(/\/s\/[^/]+/);
-  const url = new URL(page.url());
-  const m = url.hash.match(/k=([A-Za-z0-9_-]+)/);
-  return { slug: url.pathname.split('/').pop(), key: m ? m[1] : null };
+  const { slug, keyB64 } = readLocation(page.url());
+  return { slug, key: keyB64, url: page.url() };
 }
 
 export const uniqueName = (prefix) => `${prefix}-${Date.now().toString(36)}`;

@@ -35,3 +35,22 @@ func TestExistingSlugGuardsSessionPages(t *testing.T) {
 		}
 	}
 }
+
+func TestRejectEscapedFragment(t *testing.T) {
+	h := rejectEscapedFragment(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("page"))
+	}))
+	for path, want := range map[string]int{
+		"/s/":                              http.StatusOK,
+		"/s/?x=1":                          http.StatusOK,
+		"/s/?_escaped_fragment_=abc":       http.StatusNotFound,
+		"/s/?_escaped_fragment_=":          http.StatusNotFound,
+		"/launch/x?a=1&_escaped_fragment_": http.StatusNotFound,
+	} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != want {
+			t.Errorf("%s: got %d want %d", path, w.Code, want)
+		}
+	}
+}

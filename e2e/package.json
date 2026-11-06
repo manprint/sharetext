@@ -7,6 +7,8 @@
     "test": "node --test --test-concurrency=1 *.e2e.mjs"
   },
   "devDependencies": {
+    "linkify-it": "6.1.0",
+    "linkifyjs": "4.4.0",
     "playwright-core": "1.65.0"
   }
 }

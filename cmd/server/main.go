@@ -66,6 +66,19 @@ func existingSlug(st *store.Store, w http.ResponseWriter, r *http.Request) (stri
 	return slug, true
 }
 
+// rejectEscapedFragment answers 404 to the old AJAX-crawling scheme, which
+// rewrites /s/#!<address> into ?_escaped_fragment_=<address> and so would
+// hand the session key to the server. Nothing here serves such snapshots.
+func rejectEscapedFragment(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Has("_escaped_fragment_") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		os.Exit(runHealthcheck(os.Getenv("PORT")))
@@ -157,6 +170,7 @@ func main() {
 		Logf:           log.Printf,
 	}))
 	r.Use(middleware.Recoverer)
+	r.Use(rejectEscapedFragment)
 	r.Use(handlers.SecurityHeaders(handlers.SecurityHeadersConfig{
 		Enabled:                 cfg.SecurityHeadersEnabled,
 		ContentSecurityPolicy:   cfg.ContentSecurityPolicy,
@@ -239,6 +253,16 @@ func main() {
 			if err := tpl.ExecuteTemplate(w, "launcher.html", pageData{Slug: slug, ManifestPath: sessionManifestPath(slug)}); err != nil {
 				log.Printf("render launcher: %v", err)
 			}
+		})
+		// Share links (/s/#!<slug><key><check>) keep the whole address in the
+		// fragment: the page reads it client side (share-link.js).
+		g.With(requestTimeout).Get("/s/", func(w http.ResponseWriter, r *http.Request) {
+			if err := tpl.ExecuteTemplate(w, "session.html", pageData{IdleReleaseMs: cfg.LockIdleRelease.Milliseconds()}); err != nil {
+				log.Printf("render session shell: %v", err)
+			}
+		})
+		g.Get("/s", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/s/", http.StatusMovedPermanently)
 		})
 		g.With(requestTimeout).Get("/s/{slug}", func(w http.ResponseWriter, r *http.Request) {
 			slug, ok := existingSlug(st, w, r)

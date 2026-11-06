@@ -4,11 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0f766e">
-  <title>sharetext · {{.Slug}}</title>
+  <title>sharetext{{if .Slug}} · {{.Slug}}{{end}}</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="apple-touch-icon" href="/static/icon-180.png">
-  <link rel="manifest" href="{{.ManifestPath}}">
+  {{if .ManifestPath}}<link rel="manifest" href="{{.ManifestPath}}">{{end}}
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/shell-guard.js"></script>
 </head>
 <body data-slug="{{.Slug}}" data-idle-release="{{.IdleReleaseMs}}">
   <div id="offline-banner" class="offline-banner" hidden>Offline — sola lettura</div>

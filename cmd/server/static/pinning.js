@@ -1,4 +1,11 @@
+import { sessionPath } from './share-link.js';
+
 const PIN_PREFIX = 'sharetext.pin:';
+// Where a remembered key came from. Only a key that arrived in a link may go
+// back into a link: a password-derived key in the address bar (and so in
+// "Copia link") would open the session without the password.
+export const KEY_FROM_LINK = 'link';
+export const KEY_FROM_PASSWORD = 'password';
 const SLUG_RE = /^[A-Za-z0-9_-]+$/;
 const KEY_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -20,9 +27,11 @@ export function buildPinnedManifestPath(slug) {
 }
 
 export function buildPinnedSessionURL(slug, key) {
-  const base = `/s/${encodeURIComponent(String(slug || ''))}`;
-  const normalizedKey = normaliseKey(key);
-  return normalizedKey ? `${base}#k=${normalizedKey}` : base;
+  return sessionPath(String(slug || ''), normaliseKey(key));
+}
+
+function normaliseSource(source) {
+  return source === KEY_FROM_LINK || source === KEY_FROM_PASSWORD ? source : null;
 }
 
 export function pinStorageKey(slug) {
@@ -36,9 +45,11 @@ export function loadPinnedSession(storage, slug) {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || parsed.slug !== slug) return null;
+    const key = normaliseKey(parsed.key);
     return {
       slug,
-      key: normaliseKey(parsed.key),
+      key,
+      source: key ? normaliseSource(parsed.source) : null,
       updatedAt: Number.isFinite(parsed.updatedAt) ? parsed.updatedAt : 0,
     };
   } catch {
@@ -46,12 +57,14 @@ export function loadPinnedSession(storage, slug) {
   }
 }
 
-export function savePinnedSession(storage, slug, key) {
+export function savePinnedSession(storage, slug, key, source = null) {
   if (!storage || !isValidSlug(slug)) return false;
   try {
+    const normalizedKey = normaliseKey(key);
     const entry = {
       slug,
-      key: normaliseKey(key),
+      key: normalizedKey,
+      source: normalizedKey ? normaliseSource(source) : null,
       updatedAt: Date.now(),
     };
     storage.setItem(pinStorageKey(slug), JSON.stringify(entry));
@@ -61,21 +74,24 @@ export function savePinnedSession(storage, slug, key) {
   }
 }
 
-export function rememberPinnedSession(storage, slug, key) {
+export function rememberPinnedSession(storage, slug, key, source = null) {
   if (!storage || !isValidSlug(slug)) return false;
   const normalizedKey = normaliseKey(key);
   const existing = loadPinnedSession(storage, slug);
-  if (normalizedKey) return savePinnedSession(storage, slug, normalizedKey);
+  if (normalizedKey) return savePinnedSession(storage, slug, normalizedKey, source);
   if (existing) return true;
   return savePinnedSession(storage, slug, null);
 }
 
 export function resolvePinnedLaunch(storage, slug) {
   const entry = loadPinnedSession(storage, slug);
+  // Keys of unknown origin (saved before sources were recorded) stay out of
+  // the URL too: the session page still finds them in storage.
+  const linkKey = entry && entry.source === KEY_FROM_LINK ? entry.key : null;
   return {
     found: entry != null,
     hasPinnedKey: !!(entry && entry.key),
-    redirectURL: buildPinnedSessionURL(slug, entry ? entry.key : null),
+    redirectURL: buildPinnedSessionURL(slug, linkKey),
   };
 }
 // safeLocalStorage returns the scope's localStorage, or null when reading the
